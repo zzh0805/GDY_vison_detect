@@ -1,0 +1,17 @@
+%YAML:1.0
+---
+schema_version: "1.0"
+algorithm_version: "1.1.0"
+calibration_mode: "eye_in_hand"
+transform_name: "T_tcp_camera"
+from_frame: "camera"
+to_frame: "tcp"
+translation_unit: "m"
+equation: "p_tcp = T_tcp_camera @ p_camera"
+quality_status: "WARN"
+quality_accepted: 0
+T_tcp_camera: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: d
+   data: [ -0.689218548475, -0.720519128519, -0.076354291797, 0.066376509262, 0.718340231445, -0.693274699271, 0.057943966365, 0.008606892687, -0.094684234832, -0.014912303250, 0.995395659467, 0.243208200327, 0.000000000000, 0.000000000000, 0.000000000000, 1.000000000000 ]

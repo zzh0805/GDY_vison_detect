@@ -1,0 +1,25 @@
+application_config: ../config/workflow.yaml
+http_test:
+  service_url: http://127.0.0.1:48051
+  timeout_s: 60.0
+case:
+  task_id: field-test
+  capture_file_name: capture.png
+  image_file: ''
+  labelme_file: ''
+  labelme_target_label: request_target
+  labelme_shape_index: 0
+  capture_tcp_mm_rpy_deg: null
+  captured_image_width: 1920
+  captured_image_height: 1080
+  captured_at_unix_s: null
+  taught_tcp_mm_rpy_deg: null
+jaka_test:
+  ip: 192.168.16.158
+  sdk_path: ''
+  start_jaka: false
+  work_jaka: false
+  move_speed_mm_s: 100.0
+  move_accel_mm_s2: 300.0
+  settle_s: 1.0
+  timeout_s: 30.0

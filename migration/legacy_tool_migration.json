@@ -1,0 +1,77 @@
+{
+  "schema_version": "2.0",
+  "source_project": "GDY_vison_detect",
+  "target_project": "GDY_vison_detect_v2",
+  "method": "preserve_saved_taught_tcp_relative_to_inverse_handeye_plus_global_correction_standard_tcp",
+  "global_tcp_correction_mm_rpy_deg": [
+    -0.1,
+    11.0,
+    6.1,
+    1.2,
+    0.3,
+    -6.0
+  ],
+  "greenbtn": {
+    "source_reference_result": "source/greenbtn_reference_result.json",
+    "legacy_camera_to_tool_mm_rpy_deg": [
+      28.9853,
+      -57.8728,
+      -254.4432,
+      0.2799,
+      0.1512,
+      -134.2040
+    ],
+    "saved_taught_tcp_mm_rpy_deg": [
+      1086.0833474919043,
+      -217.7166416407779,
+      626.2074992400945,
+      90.7245413921842,
+      -46.95519269428417,
+      85.6695698282488
+    ],
+    "standard_tcp_mm_rpy_deg": [
+      1104.359729381542,
+      -248.05296142013788,
+      510.2166718713014,
+      89.1385303072919,
+      -47.2037352151595,
+      91.94354502511682
+    ],
+    "standard_to_tool_mm_rpy_deg": [
+      106.13062719349351,
+      56.35420281923076,
+      -16.39159121480649,
+      -3.005278348281233,
+      -4.276207860758056,
+      -0.1413105621830117
+    ],
+    "configured_rounded_standard_to_tool_mm_rpy_deg": [
+      106.130627,
+      56.354203,
+      -16.391591,
+      -3.005278,
+      -4.276208,
+      -0.141311
+    ],
+    "anchor_reproduction_position_residual_mm": 0.000000000000111,
+    "crosscheck_result": "source/greenbtn_crosscheck_result.json",
+    "crosscheck_position_difference_mm": 0.014974,
+    "crosscheck_max_rpy_component_difference_deg": 0.000072
+  },
+  "redbtn": {
+    "method": "same_physical_tool_as_greenbtn",
+    "standard_to_tool_source": "greenbtn"
+  },
+  "run": {
+    "standard_to_tool_mm_rpy_deg": [0, 0, 0, 0, 0, 0],
+    "meaning": "corrected_50mm_camera_center_alignment"
+  },
+  "konb1": {
+    "standard_to_tool_mm_rpy_deg": [0, 0, 0, 0, 0, 0],
+    "meaning": "corrected_50mm_camera_center_alignment"
+  },
+  "redkonb": {
+    "standard_to_tool_mm_rpy_deg": [0, 0, 0, 0, 0, 0],
+    "meaning": "corrected_50mm_camera_center_alignment"
+  }
+}

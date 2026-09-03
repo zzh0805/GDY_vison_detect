@@ -1,0 +1,44 @@
+# GDY视觉v3工具工作位热加载配置。
+#
+# 每次/get_tcp_pose解算都会重新读取本文件。standard_to_tool定义为：
+# “逆手眼 + 全局修正后的标准活动TCP”到最终工具工作TCP的固定局部变换。
+# xyz_mm是标准TCP局部坐标系中的毫米位移，rpy_deg为JAKA RPY角度。
+version: 1
+
+tools:
+  greenbtn:
+    tool_id: tool_green_button
+    enabled: true
+    # 由v1现场示教结果数学迁移；详见 migration/TOOL_OFFSET_MIGRATION.md。
+    standard_to_tool:
+      xyz_mm: [106.130627, 56.354203, -16.391591]
+      rpy_deg: [-3.005278, -4.276208, -0.141311]
+
+  redbtn:
+    tool_id: tool_red_button
+    enabled: true
+    # 与greenbtn同一物理工具，共用迁移后的偏移。
+    standard_to_tool:
+      xyz_mm: [106.130627, 56.354203, -16.391591]
+      rpy_deg: [-3.005278, -4.276208, -0.141311]
+
+  run:
+    tool_id: tool_run
+    enabled: true
+    standard_to_tool:
+      xyz_mm: [0.0, 0.0, 0.0]
+      rpy_deg: [0.0, 0.0, 0.0]
+
+  konb1:
+    tool_id: tool_knob_1
+    enabled: true
+    standard_to_tool:
+      xyz_mm: [144.6178, -15.8401, -16.9575]
+      rpy_deg: [-0.0006, -0.0020, 0.0004]
+
+  redkonb:
+    tool_id: tool_red_knob
+    enabled: true
+    standard_to_tool:
+      xyz_mm: [152.3221, -9.8886, -21.3184]
+      rpy_deg: [0.6305, -0.0013, 0.0012]

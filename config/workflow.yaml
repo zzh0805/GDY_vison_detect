@@ -1,0 +1,102 @@
+system:
+  initialization_timeout_s: 60
+  task_timeout_s: 90
+  output_directory: ../output
+  # 检测(/get_tcp_pose)流程保存开关：
+  save_report: true        # 检测保存 result.json 报告
+  save_debug_image: true   # 检测保存 detection_overlay.png 检测图（含YOLO框/平面标注）
+  save_point_cloud: false  # 检测保存点云 ply
+  # 后台运行日志（按天滚动，UTF-8，保留最近 N 天）。排障看 service.log：
+  # 生命周期/每次请求/快照/检测匹配/几何质量(深度源/RMS)/求解/错误traceback。
+  log:
+    enabled: true          # 总开关
+    level: INFO            # DEBUG 可看逐框检测与HTTP访问细节；线上用 INFO
+    file: ../service.log   # 相对项目根（run_service 默认覆盖为项目内 service.log）
+    # 保留最近7天：每次服务启动（开机自启后）自动扫描并删除超过7天的旧日志；
+    # 运行中每天0点滚动新文件（service.log.2026-08-30 ...）并同样只保留7天。
+    retention_days: 7
+    console: true          # 同时输出到控制台（nohup 重定向时也进 service.log）
+
+http:
+  listen_host: 0.0.0.0
+  listen_port: 48051
+  snapshot_directory: ../shared_images
+  # 收到/snapshot请求后等待秒数再采集（相机帧率低，取稳定帧）。
+  snapshot_delay_s: 4
+  # 快照是否保存图片到磁盘（默认开；关掉则/snapshot不落盘）。
+  save_snapshot: true
+  client_idle_timeout_s: 60  # 单次任务超时（live 实时采集含相机取帧，帧率低，需放宽）。
+  request_timeout_s: 60
+camera:
+  type: surfacepro50
+  ip: "192.168.16.122"
+  calibration_file: ../calibration/chishine_192_168_16_122_calibration.yml
+  python_path: ""
+  openni_redist: ""
+  show_driver_frame_output: false
+  unload_openni_on_disconnect: false
+
+calibration:
+  handeye_result_file: ../calibration/handeye_result.json
+  require_accepted: true
+
+yolo:
+  model_file: ../models/xuncao.pt
+  confidence: 0.5
+  iou: 0.7
+  device: ""
+  max_detections: 100
+  load_model_at_start: true
+  # 留空表示保留YOLO模型返回的全部类别。
+  class_names: []
+
+target_matching:
+  # 后台四角点所属的原始彩色图尺寸。
+  source_image_width: 1920
+  source_image_height: 1080
+  prefer_center_inside_polygon: true
+  # 2026-08-29: 提到500以匹配第二工件konb1标注框与YOLO中心偏差(~364px)。
+  max_match_distance_px: 500
+
+plane_fitting:
+  # 固定为外围安装平面；不使用目标自身深度。
+  mode: surrounding_panel
+  surrounding_expand_ratio: 1.0
+  exclude_box_margin_ratio: 0.15
+  bbox_shrink_ratio: 0.15
+  center_patch_radius_px: 5
+  min_points: 100
+  max_sample_points: 20000
+  ransac_threshold_mm: 3.0
+  min_inlier_ratio: 0.35
+  max_rms_mm: 3.0
+
+pose:
+  # v3沿用v2坐标链：光心50mm参考 -> 逆手眼得到活动TCP -> 全局修正形成
+  # 标准TCP -> standard_to_tool得到最终工作TCP。全局修正只施加一次。
+  pipeline_version: 2
+  alignment_mode: tool
+  # 相机光心参考位到目标平面的距离。
+  standoff_mm: 50.0
+  output_reference_frame: jaka_base
+  output_pose_reference: active_tcp
+  output_position_unit: mm
+  output_rotation_type: rpy
+  output_angle_unit: deg
+  # 现场全局修正：只对“光心参考 @ 逆手眼”得到的标准活动TCP施加一次，
+  # 然后才叠加各工具工作位偏移。保持现场已验证的基座系分量加法语义。
+  tcp_correction:
+    position_mm: [-0.1, 11.0, 6.1]
+    rpy_deg: [1.2, 0.3, -6.0]
+
+# v3把工具标定独立出来；服务每次/get_tcp_pose都会重新读取并校验此文件。
+# 修改工具偏移后无需重启相机、YOLO或视觉服务。
+tool_offsets:
+  file: ./tool_offsets.yaml
+
+annotation_capture:
+  root_directory: ../field_test/images
+  image_format: png
+  jpeg_quality: 95
+  # 现场采样默认只保存彩色图；TCP写入field_test/test_case.yaml。
+  save_metadata_json: false

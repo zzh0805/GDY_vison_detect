@@ -1,0 +1,65 @@
+%YAML:1.0
+---
+sdk_version: "V3.2.229"
+sdk_build_date: "Nov  6 2025 18:00:06"
+camera_name: "3DCamera-net"
+camera_serial: "A26100033B6G00D33"
+camera_unique_id: "192.168.16.122"
+camera_firmware: "v5.2.04.0528"
+camera_algorithm: "v1.7.8.0825"
+depth_stream_type: 0
+rgb_stream_type: 1
+depth_width: 960
+depth_height: 600
+rgb_width: 960
+rgb_height: 600
+distortion_order_sdk: "k1,k2,k3,k4,k5"
+extrinsics_direction: "P_rgb = R_depth_to_rgb * P_depth + T_depth_to_rgb"
+translation_unit: "vendor SDK native unit; values are not scaled"
+rotation_storage_header: "column-major (does not match measured image registration on this device)"
+rotation_interpretation_used: "SDK rotation[9] reshaped directly as row-major; verified by depth/RGB edges"
+cameraMatrix_depth: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 981.46484375, 0, 442.83718872070312, 0, 981.46484375, 278.43060302734375, 0, 0, 1 ]
+distCoeffs_depth_sdk_order: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [ 0, 0, 0, 0, 0 ]
+cameraMatrix_rgb: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 1015.3929443359375, 0, 519.78411865234375, 0, 1128.0120849609375, 304.57470703125, 0, 0, 1 ]
+distCoeffs_rgb_sdk_order: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [ -0.10545704513788223, 0.20739182829856873, -0.00056559237418696284, -4.7707853809697554e-05, 0 ]
+R_sdk_raw: !!opencv-matrix
+   rows: 1
+   cols: 9
+   dt: d
+   data: [ 0.99529200792312622, -0.0017605390166863799, -0.096905961632728577, 0.0017281773034483194, 0.99999839067459106, -0.00041788170346990228, 0.096906542778015137, 0.00024844362633302808, 0.99529343843460083 ]
+R_depth_to_rgb: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 0.99529200792312622, -0.0017605390166863799, -0.096905961632728577, 0.0017281773034483194, 0.99999839067459106, -0.00041788170346990228, 0.096906542778015137, 0.00024844362633302808, 0.99529343843460083 ]
+R_header_column_major_interpretation: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 0.99529200792312622, 0.0017281773034483194, 0.096906542778015137, -0.0017605390166863799, 0.99999839067459106, 0.00024844362633302808, -0.096905961632728577, -0.00041788170346990228, 0.99529343843460083 ]
+T_depth_to_rgb: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: d
+   data: [ -22.332376480102539, -0.60751008987426758, -1.4677379131317139 ]
+extrinsicMatrix_depth_to_rgb: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: d
+   data: [ 0.99529200792312622, -0.0017605390166863799, -0.096905961632728577, -22.332376480102539, 0.0017281773034483194, 0.99999839067459106, -0.00041788170346990228, -0.60751008987426758, 0.096906542778015137, 0.00024844362633302808, 0.99529343843460083, -1.4677379131317139, 0, 0, 0, 1 ]

@@ -1,0 +1,6 @@
+numpy
+PyYAML
+opencv-python-headless
+ultralytics
+tifffile
+

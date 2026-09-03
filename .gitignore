@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+linux_sdk_paths.env
+output/
+shared_images/
+service.log
+service.log.*
+core
+core.*
+field_test/output/*
+field_test/images/*
+field_test/annotations/*
+!field_test/output/.gitkeep
+!field_test/images/.gitkeep
+!field_test/annotations/.gitkeep
