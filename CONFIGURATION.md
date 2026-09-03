@@ -7,6 +7,8 @@
 | 配置 | 当前值 | 说明 |
 |---|---:|---|
 | `http.listen_port` | `48051` | HTTP监听端口，需与防火墙和客户端一致 |
+| `http.snapshot_delay_s` | `4` | `/snapshot`收到请求后等待再采集的秒数 |
+| `http.live_capture_delay_s` | `4` | `/get_tcp_pose live=true`收到请求后等待再采集的秒数 |
 | `camera.ip` | `192.168.16.122` | SurfacePro50地址 |
 | `camera.calibration_file` | `../calibration/chishine_192_168_16_122_calibration.yml` | 相机内外参文件 |
 | `calibration.handeye_result_file` | `../calibration/handeye_result.json` | 手眼标定结果 |
@@ -35,12 +37,13 @@
 - `listen_host`：通常保持 `0.0.0.0`；
 - `listen_port`：当前为 `48051`；
 - `snapshot_directory`：`/snapshot` 保存彩色图的位置；
-- `snapshot_delay_s`：快照请求到达后等待稳定帧的时间，当前为旧流程使用的 `5.0` 秒；
+- `snapshot_delay_s`：两步流程的快照请求到达后等待稳定帧的时间，当前为 `4` 秒；
+- `live_capture_delay_s`：实时检测请求到达后等待机械臂和相机稳定的时间，当前为 `4` 秒；
 - `save_snapshot`：是否将快照保存到磁盘；
 - `request_timeout_s`：可选，未填写时为 15 秒；
 - `snapshot_cache_ttl_s`：可选，未填写时为 300 秒。
 
-两步流程依赖快照文件供人工或后台框选，因此 `save_snapshot` 应保持开启。实时 `live=true` 流程不依赖快照文件。
+两步流程依赖快照文件供人工或后台框选，因此 `save_snapshot` 应保持开启。实时 `live=true` 流程不依赖快照文件，它只使用 `live_capture_delay_s`；缓存解算不会在 `/get_tcp_pose` 阶段重复等待。
 
 ## `camera`
 

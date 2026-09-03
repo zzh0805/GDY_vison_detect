@@ -21,8 +21,11 @@ http:
   listen_host: 0.0.0.0
   listen_port: 48051
   snapshot_directory: ../shared_images
-  # 收到/snapshot请求后等待秒数再采集（相机帧率低，取稳定帧）。
+  # 两步流程：收到/snapshot请求后等待秒数再采集。
   snapshot_delay_s: 4
+  # 实时流程：收到/get_tcp_pose且live=true后等待秒数，再拍照并解算。
+  # 与snapshot_delay_s分开，避免两步流程重复等待。
+  live_capture_delay_s: 4
   # 快照是否保存图片到磁盘（默认开；关掉则/snapshot不落盘）。
   save_snapshot: true
   client_idle_timeout_s: 60  # 单次任务超时（live 实时采集含相机取帧，帧率低，需放宽）。

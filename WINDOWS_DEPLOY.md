@@ -99,9 +99,11 @@ TCP解算的字段、坐标单位和 `live` 模式见 [INTERFACE.md](INTERFACE.m
 
 ## 6. 工具偏移热更新
 
-服务运行时直接编辑并保存 `config/tool_offsets.yaml`。下一次 `/get_tcp_pose` 会读取新值，无需重启服务。可以在 `service.log` 中核对 `工具偏移xyz`、`rpy` 和配置SHA-256。
+服务运行时直接编辑并保存 `config/tool_offsets.yaml`。下一次 `/get_tcp_pose` 会读取新值，无需重启服务。可以在 `service.log` 中核对 `工具偏移xyz`、`rpy` 和配置SHA-256。Windows可直接运行 `calibrate_tool_offset.py`；`run_tool_calibration.sh` 是Ubuntu Bash包装脚本。
 
 只有工具文件支持热更新。修改 `workflow.yaml`、模型、相机标定或手眼标定后必须重启服务。工具文件语法或数值无效时，本次请求返回500且不会沿用旧参数；修复后直接重试。
+
+实时 `live=true` 请求在服务端等待 `http.live_capture_delay_s`（当前4秒）后再采集。等待期间不要移动机械臂、相机或目标。
 
 ## 7. 现场联调
 

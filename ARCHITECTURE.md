@@ -45,7 +45,8 @@ POST /get_tcp_pose（live省略或false）
 
 实时流程：
 POST /get_tcp_pose（live=true）
-    → 直接采集一份新帧
+    → 等待 live_capture_delay_s（当前4秒）
+    → 采集一份新帧
     → 检测、平面拟合和解算
     → 返回目标TCP
 ```

@@ -55,11 +55,25 @@ bash run_field_test.sh
 bash run_field_test.sh --live
 ```
 
+服务会在收到这个实时解算请求后等待 `http.live_capture_delay_s`（当前4秒），再拍照、检测和解算。等待期间机械臂、相机和目标必须保持静止。
+
 只有在坐标、角度单位、方向和安全距离全部人工确认后，才可以将 `work_jaka` 改为 `true`。
 
 对于零偏移类别，`result.json` 中应满足 `targetTcpMmRpyDeg == cameraReference.standardTcpMmRpyDeg`。按钮类别则应在标准TCP之后叠加迁移后的 `standard_to_tool`。
 
-需要标定新工具时，先保存v3解算的 `result.json`，再将工具示教到最终工作位并执行：
+需要标定新工具或重新标定旧工具时，先保存v3解算的完整 `result.json`，再将工具示教到最终工作位。推荐编辑 `run_tool_calibration.sh` 顶部的用户参数区，然后执行：
+
+```bash
+bash run_tool_calibration.sh
+```
+
+脚本的 `MODE` 支持：
+
+- `calibrate`：新工具标定或旧工具完整重标定；
+- `verify`：验证已有偏移对应的最终TCP；
+- `adjust`：按JAKA基座系位置和小幅RPY分量修正旧偏移。
+
+也可以直接调用底层Python命令：
 
 ```bash
 python calibrate_tool_offset.py \

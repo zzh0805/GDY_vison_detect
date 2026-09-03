@@ -221,6 +221,12 @@ class AppConfig:
             raise ValueError("http.listen_port必须在1~65535之间")
         if float(http.get("request_timeout_s", 15.0)) <= 0.0:
             raise ValueError("http.request_timeout_s必须大于0")
+        for delay_name, default_value in (
+                ("snapshot_delay_s", 5.0),
+                ("live_capture_delay_s", 4.0)):
+            delay_s = float(http.get(delay_name, default_value))
+            if not math.isfinite(delay_s) or delay_s < 0.0:
+                raise ValueError(f"http.{delay_name}必须是非负有限数字")
         if float(http.get("snapshot_cache_ttl_s", 300.0)) <= 0.0:
             raise ValueError("http.snapshot_cache_ttl_s必须大于0")
         self.resolve_path(http.get("snapshot_directory", "../shared_images"))

@@ -229,9 +229,22 @@ class VisionToolTcpSolver:
                  np.round(request.capture_tcp_mm_rpy_deg, 3).tolist(),
                  np.asarray(request.target_corners_px).reshape(-1).tolist(),
                  base_rect)
-        frame = (self._cached_http_snapshot()
-                 if bool(payload.get("useCachedHttpSnapshot", False))
-                 else self.camera.capture_3d())
+        use_cached_snapshot = bool(
+            payload.get("useCachedHttpSnapshot", False))
+        live_capture_delay_s = 0.0
+        if use_cached_snapshot:
+            frame = self._cached_http_snapshot()
+        else:
+            # live=true路径收到解算请求后先等待机械臂/相机稳定，再采集本次
+            # 实时帧。两步流程已在/snapshot内等待，这里不能重复延时。
+            live_capture_delay_s = float(
+                self.config.http.get("live_capture_delay_s", 4.0))
+            if live_capture_delay_s > 0.0:
+                log.info(
+                    "实时解算: 收到请求后等待稳定 %.1fs，再拍照检测",
+                    live_capture_delay_s)
+                time.sleep(live_capture_delay_s)
+            frame = self.camera.capture_3d()
         camera_model = self.camera.camera_model(frame)
 
         matching = self.config.matching
@@ -352,6 +365,7 @@ class VisionToolTcpSolver:
             "referenceFrame": pose["referenceFrame"],
             "poseReference": pose["poseReference"],
             "standoffMm": pose["standoffMm"],
+            "liveCaptureDelaySApplied": live_capture_delay_s,
             "cameraReference": {
                 "definition": "camera_origin_on_target_normal_standoff_only",
                 "standoffMm": pose["standoffMm"],
@@ -407,7 +421,7 @@ class VisionToolTcpSolver:
         saved = self.artifacts.save_result(
             request.task_id, result, batch.debug_overlay)
         result.update(saved)
-        if bool(payload.get("useCachedHttpSnapshot", False)):
+        if use_cached_snapshot:
             # 成功响应生成后释放大图和点云；下一轮必须重新/snapshot。
             self._clear_http_snapshot()
         return result

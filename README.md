@@ -10,6 +10,15 @@
 
 正式服务只计算目标 TCP，不控制机械臂运动。
 
+## 当前版本
+
+`v3.1.0`（2026-09-03）更新内容：
+
+- `/get_tcp_pose` 使用 `live=true` 时，服务收到请求后等待 `live_capture_delay_s`（当前4秒），再拍照、检测和解算；
+- `/snapshot` 继续单独使用 `snapshot_delay_s`，缓存解算不会重复等待；
+- 新增 `run_tool_calibration.sh`，在Ubuntu上修改脚本顶部参数后即可通过Bash完成新工具标定、旧工具重标定、验证和微调；
+- 增加实时延时自动测试，并同步更新配置、接口、现场和部署文档。
+
 ## 项目功能
 
 - 长期独占连接一台SurfacePro50，只在收到请求时采集彩色图和配准点云；
@@ -32,6 +41,7 @@
 | `models/xuncao.pt` | YOLO模型 |
 | `field_test/` | 快照、LabelMe标注、坐标解算、JAKA只读/运动联调脚本 |
 | `calibrate_tool_offset.py` | 根据标准TCP与工具示教TCP反算 `standard_to_tool` |
+| `run_tool_calibration.sh` | Ubuntu可编辑参数式工具标定、验证和微调入口 |
 | `migrate_legacy_tool_offset.py` | 将旧版工具标定迁移到统一坐标链 |
 | `start_vision_service.*` / `stop_vision_service.*` | Ubuntu和Windows后台启停脚本 |
 | `tests/` / `run_simulated_test.py` | 不连接真实相机和机器人的自动测试 |
@@ -41,7 +51,7 @@
 
 服务启动时创建一个 `SurfacePro50SyncAdapter` 并连接一次相机。所有视觉任务由一个串行的 `vision-task-worker` 执行，请求到来时直接调用旧项目的 `adapter.capture()` 或 `capture_color()`；空闲时不循环拍照，也没有额外的相机采集线程或取帧命令队列。服务退出时才断开相机。
 
-`POST /snapshot` 默认先等待5秒，再采集彩色图和配准点云，以降低低帧率相机读到未稳定帧的概率。`POST /get_tcp_pose` 使用 `live=true` 时直接采集新帧；不传 `live` 时使用最近一次 `/snapshot` 的内存缓存。
+`POST /snapshot` 当前先等待4秒，再采集彩色图和配准点云。`POST /get_tcp_pose` 使用 `live=true` 时也会在收到请求后等待4秒，然后采集新帧、检测并解算；不传 `live` 时使用最近一次 `/snapshot` 的内存缓存，不再重复等待。
 
 ## v3解算方式
 
@@ -62,6 +72,14 @@
 服务启动后可直接修改 [config/tool_offsets.yaml](config/tool_offsets.yaml)。下一次 `/get_tcp_pose` 会在确定YOLO类别后重新读取并校验整个文件，然后才计算最终TCP。相机连接、YOLO模型、手眼矩阵和 `pose.tcp_correction` 不会重新初始化。
 
 如果文件存在YAML语法错误、缺少类别、数组不是3个有限数字或仍使用v1字段 `camera_to_tool`，本次请求会失败并且不会沿用旧偏移。修正文件后直接重试即可，不需要重启服务。`service.log` 和保存的 `result.json` 会记录本次实际使用的数值及文件SHA-256。
+
+Ubuntu工具标定不需要手写长命令。编辑 [run_tool_calibration.sh](run_tool_calibration.sh) 顶部“用户参数区”，然后运行：
+
+```bash
+bash run_tool_calibration.sh
+```
+
+脚本只计算并输出可粘贴的YAML，不连接相机、不控制机械臂，也不会自动覆盖配置文件。
 
 ## Ubuntu 快速启动
 

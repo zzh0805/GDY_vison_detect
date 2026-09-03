@@ -40,7 +40,7 @@ curl -X POST http://127.0.0.1:48051/snapshot
 - `pos`：采集该帧时的 JAKA 当前活动 TCP，单位为 `mm + RPY rad`；
 - `base`：可选的安装面板矩形，提供时目标中心深度以该平面为准；
 - `target`：目标矩形，坐标对应 `target_matching` 中配置的原图尺寸；
-- `live=true`：直接采集新帧并完成检测、解算；
+- `live=true`：收到请求后等待 `http.live_capture_delay_s`（当前4秒），再采集新帧并完成检测、解算；
 - `live=false` 或省略：使用最近一次 `/snapshot` 的缓存帧。
 
 兼容旧矩形字段：
@@ -83,6 +83,8 @@ curl -X POST http://127.0.0.1:48051/get_tcp_pose \
 ```
 
 发送请求前先读取当前 TCP，随后保持机械臂静止，直到服务完成本次采集和解算。
+
+实时等待发生在服务端，并从请求进入内部解算任务后开始。两步流程的等待发生在 `/snapshot`，后续缓存 `/get_tcp_pose` 不会再次等待。
 
 ## 失败响应
 

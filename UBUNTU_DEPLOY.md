@@ -38,9 +38,10 @@ python -m pip install -r requirements.txt
 2. 相机标定、手眼标定和 YOLO模型文件存在；
 3. `http.listen_port` 与客户端、启动脚本一致，当前统一为 `48051`；
 4. `source_image_width/height` 与实际彩色图一致；
-5. `pipeline_version=2`，且 `standoff_mm`、`tcp_correction` 使用本套机械结构对应的标定值；
-6. `tool_offsets.file` 指向有效工具文件，工具类别及 `standard_to_tool` 正确；
-7. 输出目录有写权限和足够空间。
+5. `snapshot_delay_s=4`、`live_capture_delay_s=4`，并确认请求超时大于拍照等待和检测总耗时；
+6. `pipeline_version=2`，且 `standoff_mm`、`tcp_correction` 使用本套机械结构对应的标定值；
+7. `tool_offsets.file` 指向有效工具文件，工具类别及 `standard_to_tool` 正确；
+8. 输出目录有写权限和足够空间。
 
 检查网络和文件：
 
@@ -71,6 +72,14 @@ curl -X POST http://127.0.0.1:48051/snapshot
 首次只验证拍照和返回坐标，不执行机械臂运动。先用零偏移类别确认返回的是“逆手眼+全局修正”的50mm标准TCP，再低速验证迁移后的按钮工具位。
 
 服务运行期间修改 `config/tool_offsets.yaml` 后无需重启。下一次 `/get_tcp_pose` 自动使用新值；若文件格式错误，该请求返回500并拒绝输出旧偏移结果，修正后直接重试。
+
+在Ubuntu上标定或微调工具时，修改 `run_tool_calibration.sh` 顶部用户参数区并运行：
+
+```bash
+bash run_tool_calibration.sh
+```
+
+该脚本不访问相机或机械臂，仅包装 `calibrate_tool_offset.py` 完成数学计算。
 
 ## 5. 后台启动
 
