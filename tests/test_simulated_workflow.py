@@ -7,7 +7,6 @@ import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import yaml
@@ -52,6 +51,7 @@ class FakeCamera:
     def __init__(self):
         self.connected = False
         self.frame_id = 0
+        self.discard_durations = []
         self.K = np.array([
             [100.0, 0.0, 50.0],
             [0.0, 100.0, 50.0],
@@ -106,6 +106,10 @@ class FakeCamera:
     def capture_color(self):
         return self._frame(with_cloud=False)
 
+    def discard_frames(self, duration_s):
+        self.discard_durations.append(float(duration_s))
+        return 3
+
 
 def fake_detector() -> YoloTargetDetector:
     return YoloTargetDetector(
@@ -156,7 +160,8 @@ class SimulatedWorkflowTests(unittest.TestCase):
             encoding="utf-8")
 
     def write_config(self, alignment_mode: str,
-                     live_capture_delay_s: float = 0.0) -> None:
+                     live_capture_delay_s: float = 0.0,
+                     snapshot_delay_s: float = 0.0) -> None:
         self.write_tool_offsets()
         data = {
             "system": {
@@ -179,7 +184,7 @@ class SimulatedWorkflowTests(unittest.TestCase):
                 "request_timeout_s": 5,
                 "snapshot_cache_ttl_s": 30,
                 "snapshot_directory": str(self.root / "http_images"),
-                "snapshot_delay_s": 0,
+                "snapshot_delay_s": snapshot_delay_s,
                 "live_capture_delay_s": live_capture_delay_s,
                 "jpeg_quality": 95,
             },
@@ -228,8 +233,10 @@ class SimulatedWorkflowTests(unittest.TestCase):
 
     @contextmanager
     def http_service(self, alignment_mode="camera_center",
-                     live_capture_delay_s=0.0):
-        self.write_config(alignment_mode, live_capture_delay_s)
+                     live_capture_delay_s=0.0,
+                     snapshot_delay_s=0.0):
+        self.write_config(
+            alignment_mode, live_capture_delay_s, snapshot_delay_s)
         camera = FakeCamera()
         solver = VisionToolTcpSolver(
             self.config_path, camera=camera, detector=fake_detector())
@@ -278,30 +285,40 @@ class SimulatedWorkflowTests(unittest.TestCase):
         self.assertEqual(camera.frame_id, 1)
         self.assertFalse(camera.connected)
 
-    def test_live_capture_waits_configured_delay_before_capture(self):
-        with patch("vision_solver.api.time.sleep") as sleep_mock:
-            with self.http_service(
-                    "camera_center", live_capture_delay_s=4.0
-            ) as (client, camera):
-                solved = client.get_tcp_pose(
-                    [0, 0, 0, 0, 0, 0], 40, 40, 60, 60, live=True)
-                self.assertTrue(camera.connected)
+    def test_live_capture_discards_stale_frames_during_stable_period(self):
+        with self.http_service(
+                "camera_center", live_capture_delay_s=4.0
+        ) as (client, camera):
+            solved = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 40, 40, 60, 60, live=True)
+            self.assertTrue(camera.connected)
 
         self.assertEqual(solved["code"], 200, solved)
-        sleep_mock.assert_called_once_with(4.0)
+        self.assertEqual(camera.discard_durations, [4.0])
+        self.assertEqual(camera.frame_id, 1)
+
+    def test_snapshot_discards_stale_frames_then_cached_solve_does_not(self):
+        with self.http_service(
+                "camera_center", snapshot_delay_s=4.0
+        ) as (client, camera):
+            self.assertEqual(client.snapshot()["code"], 200)
+            solved = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 40, 40, 60, 60)
+
+        self.assertEqual(solved["code"], 200, solved)
+        self.assertEqual(camera.discard_durations, [4.0])
         self.assertEqual(camera.frame_id, 1)
 
     def test_cached_solve_does_not_repeat_live_delay(self):
-        with patch("vision_solver.api.time.sleep") as sleep_mock:
-            with self.http_service(
-                    "camera_center", live_capture_delay_s=4.0
-            ) as (client, _camera):
-                self.assertEqual(client.snapshot()["code"], 200)
-                solved = client.get_tcp_pose(
-                    [0, 0, 0, 0, 0, 0], 40, 40, 60, 60)
+        with self.http_service(
+                "camera_center", live_capture_delay_s=4.0
+        ) as (client, camera):
+            self.assertEqual(client.snapshot()["code"], 200)
+            solved = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 40, 40, 60, 60)
 
         self.assertEqual(solved["code"], 200, solved)
-        sleep_mock.assert_not_called()
+        self.assertEqual(camera.discard_durations, [])
 
     def test_base_panel_plane_solve_through_http(self):
         # 传 base(基座面板矩形) + target：目标中心深度以面板平面为准。

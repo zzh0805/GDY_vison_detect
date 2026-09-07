@@ -501,6 +501,8 @@ class SurfacePro50Backend:
             "SURFACEPRO50_EMPTY_DEPTH_RETRY_INTERVAL_S", 0.15)
         self.last_depth_scale_source = "none"
         self.last_depth_stats: Dict[str, Any] = {}
+        self.last_discarded_frame_pairs = 0
+        self.last_discard_duration_s = 0.0
         self.frame_id = 0
         self._profiles: Dict[str, Any] = {}
         self._current_profile = ""
@@ -765,6 +767,44 @@ class SurfacePro50Backend:
                 print(f"SurfacePro50 {channel}取帧异常时驱动输出:\n{driver_output}")
             raise
 
+    def discard_frames(self, duration_s: float) -> int:
+        """在指定时间内持续消费原始流，最后一次完整采集得到最新帧。
+
+        这里只从 OpenNI2 彩色/深度流读取并立即释放帧对象，不解码图像、
+        不做软件配准，也不构建点云，避免用多次完整 capture() 清缓存时产生
+        大量瞬时内存。彩色流和深度流每轮各消费一帧，尽量保持两边队列同步。
+        """
+        duration = float(duration_s)
+        if not np.isfinite(duration) or duration < 0.0:
+            raise ValueError("丢帧时长必须是非负有限数字")
+        if duration == 0.0:
+            self.last_discarded_frame_pairs = 0
+            self.last_discard_duration_s = 0.0
+            return 0
+
+        with self._lock:
+            if not self.is_connected():
+                raise RuntimeError("SurfacePro50 未连接")
+            started = time.monotonic()
+            deadline = started + duration
+            discarded = 0
+            while True:
+                image_frame = self._read_stream_frame(
+                    self.image_stream, "图像丢帧")
+                depth_frame = None
+                if (self.depth_stream is not None and
+                        self.depth_stream is not self.image_stream):
+                    depth_frame = self._read_stream_frame(
+                        self.depth_stream, "深度丢帧")
+                discarded += 1
+                # 显式释放厂商帧包装对象；下一轮或最终 capture() 再读取新帧。
+                del image_frame, depth_frame
+                if time.monotonic() >= deadline:
+                    break
+            self.last_discarded_frame_pairs = discarded
+            self.last_discard_duration_s = time.monotonic() - started
+            return discarded
+
     def _read_image(self) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         frame = self._read_stream_frame(self.image_stream, "图像")
         h, w = int(frame.height), int(frame.width)
@@ -904,10 +944,17 @@ class SurfacePro50Backend:
                         else self.software_registration_calibration.get("source")),
                     "depth_scale_mm": depth_scale,
                     "depth_scale_source": self.last_depth_scale_source,
+                    "discarded_frame_pairs_before_capture":
+                        self.last_discarded_frame_pairs,
+                    "discard_duration_s_before_capture":
+                        self.last_discard_duration_s,
                     "depth_valid_min_mm": self.min_depth_mm,
                     "depth_valid_max_mm": self.max_depth_mm,
                     **self.last_depth_stats,
                 })
+            # 丢帧统计只描述紧邻本次采集的预处理，不能泄漏到下一次采集。
+            self.last_discarded_frame_pairs = 0
+            self.last_discard_duration_s = 0.0
             self.frame_id += 1
             return frame
 
@@ -1006,6 +1053,9 @@ class SurfacePro50SyncAdapter:
 
     def capture(self) -> CameraFrame:
         return self.backend.capture(save_images=self.backend.capture_3d)
+
+    def discard_frames(self, duration_s: float) -> int:
+        return self.backend.discard_frames(duration_s)
 
     def get_intrinsics(self):
         return self.backend.get_intrinsics()

@@ -38,7 +38,7 @@ python -m pip install -r requirements.txt
 2. 相机标定、手眼标定和 YOLO模型文件存在；
 3. `http.listen_port` 与客户端、启动脚本一致，当前统一为 `48051`；
 4. `source_image_width/height` 与实际彩色图一致；
-5. `snapshot_delay_s=4`、`live_capture_delay_s=4`，并确认请求超时大于拍照等待和检测总耗时；
+5. `snapshot_delay_s=4`、`live_capture_delay_s=4`；这两个时段会主动丢弃旧帧，并确认请求超时大于丢帧、最终拍照和检测总耗时；
 6. `pipeline_version=2`，且 `standoff_mm`、`tcp_correction` 使用本套机械结构对应的标定值；
 7. `tool_offsets.file` 指向有效工具文件，工具类别及 `standard_to_tool` 正确；
 8. 输出目录有写权限和足够空间。

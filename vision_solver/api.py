@@ -145,12 +145,16 @@ class VisionToolTcpSolver:
 
     def _handle_http_snapshot(self, payload: Mapping[str, Any]) -> dict:
         """采集完整彩色+点云帧；磁盘只保存彩色图，完整帧留给下一步解算。"""
-        # 相机帧率低：收到拍照请求后等待稳定帧再采集，避免旧帧/未稳定帧。
+        # 在原稳定等待时段内持续消费原始彩色/深度帧，避免长时间空闲后
+        # 第一次 capture() 取到 OpenNI2 队列中的历史帧。
         started = time.perf_counter()
         delay_s = float(self.config.http.get("snapshot_delay_s", 5.0))
+        discarded_frames = 0
         if delay_s > 0.0:
-            log.info("快照: 等待稳定帧 %.1fs（相机帧率低）", delay_s)
-            time.sleep(delay_s)
+            log.info("快照: 在 %.1fs 稳定期内主动丢弃旧帧", delay_s)
+            discarded_frames = self.camera.discard_stale_frames(delay_s)
+            log.info("快照: 已丢弃原始彩色/深度帧对 %d 组",
+                     discarded_frames)
         frame = self.camera.capture_3d()
         color = np.asarray(frame.color)
         cloud = np.asarray(frame.point_cloud)
@@ -179,6 +183,7 @@ class VisionToolTcpSolver:
             "ok": True,
             "taskType": "http_snapshot_result",
             "taskId": str(payload.get("taskId") or ""),
+            "discardedFramePairsBeforeCapture": discarded_frames,
             **saved,
         })
 
@@ -235,16 +240,22 @@ class VisionToolTcpSolver:
         if use_cached_snapshot:
             frame = self._cached_http_snapshot()
         else:
-            # live=true路径收到解算请求后先等待机械臂/相机稳定，再采集本次
-            # 实时帧。两步流程已在/snapshot内等待，这里不能重复延时。
+            # live=true路径把原来的纯sleep改为主动消费原始流：等待时间仍
+            # 用于机械臂稳定，但同时把OpenNI2积压帧向前推进到最新位置。
             live_capture_delay_s = float(
                 self.config.http.get("live_capture_delay_s", 4.0))
+            discarded_frames = 0
             if live_capture_delay_s > 0.0:
                 log.info(
-                    "实时解算: 收到请求后等待稳定 %.1fs，再拍照检测",
+                    "实时解算: 在 %.1fs 稳定期内主动丢弃旧帧，再拍照检测",
                     live_capture_delay_s)
-                time.sleep(live_capture_delay_s)
+                discarded_frames = self.camera.discard_stale_frames(
+                    live_capture_delay_s)
+                log.info("实时解算: 已丢弃原始彩色/深度帧对 %d 组",
+                         discarded_frames)
             frame = self.camera.capture_3d()
+        if use_cached_snapshot:
+            discarded_frames = 0
         camera_model = self.camera.camera_model(frame)
 
         matching = self.config.matching
@@ -366,6 +377,7 @@ class VisionToolTcpSolver:
             "poseReference": pose["poseReference"],
             "standoffMm": pose["standoffMm"],
             "liveCaptureDelaySApplied": live_capture_delay_s,
+            "discardedFramePairsBeforeCapture": discarded_frames,
             "cameraReference": {
                 "definition": "camera_origin_on_target_normal_standoff_only",
                 "standoffMm": pose["standoffMm"],

@@ -36,7 +36,7 @@ HTTP层可以接收多个连接，但相机、检测和解算统一进入一个�
 ```text
 两步流程：
 POST /snapshot
-    → 等待 snapshot_delay_s
+    → 在 snapshot_delay_s 内持续丢弃原始彩色/深度帧
     → 直接采集彩色图和配准点云
     → 保存彩色 JPG，并在内存缓存完整帧
 POST /get_tcp_pose（live省略或false）
@@ -45,7 +45,7 @@ POST /get_tcp_pose（live省略或false）
 
 实时流程：
 POST /get_tcp_pose（live=true）
-    → 等待 live_capture_delay_s（当前4秒）
+    → 在 live_capture_delay_s 内持续丢弃原始彩色/深度帧（当前4秒）
     → 采集一份新帧
     → 检测、平面拟合和解算
     → 返回目标TCP

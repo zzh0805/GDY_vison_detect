@@ -55,7 +55,7 @@ bash run_field_test.sh
 bash run_field_test.sh --live
 ```
 
-服务会在收到这个实时解算请求后等待 `http.live_capture_delay_s`（当前4秒），再拍照、检测和解算。等待期间机械臂、相机和目标必须保持静止。
+服务会在收到这个实时解算请求后，于 `http.live_capture_delay_s`（当前4秒）内持续读取并丢弃旧的原始彩色/深度帧，再拍照、检测和解算。该时段替代原来的纯等待，期间机械臂、相机和目标必须保持静止。
 
 只有在坐标、角度单位、方向和安全距离全部人工确认后，才可以将 `work_jaka` 改为 `true`。
 

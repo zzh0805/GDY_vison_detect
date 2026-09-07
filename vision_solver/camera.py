@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -65,6 +66,19 @@ class CameraManager:
             raise TaskError(
                 "CAMERA_3D_MISSING", "相机未返回彩色图或对齐点云")
         return frame
+
+    def discard_stale_frames(self, duration_s: float) -> int:
+        """在稳定等待期主动消费旧帧；不支持该能力的适配器回退为等待。"""
+        duration = float(duration_s)
+        if duration <= 0.0:
+            return 0
+        with self._lock:
+            discard = getattr(self.adapter, "discard_frames", None)
+            if callable(discard):
+                return int(discard(duration))
+            # 兼容测试相机或其他旧适配器；SurfacePro50正式后端不会走这里。
+            time.sleep(duration)
+            return 0
 
     def capture_color(self) -> CameraFrame:
         """只采集并返回原始彩色图，不保存深度/点云。"""
