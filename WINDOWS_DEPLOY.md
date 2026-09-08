@@ -44,7 +44,7 @@ $env:PATH = "$env:JAKA_LIBRARY_PATH;$env:PATH"
 启动前检查：
 
 1. `config/workflow.yaml` 中的相机IP、HTTP端口、相机标定、手眼标定和模型路径；
-2. `config/tool_offsets.yaml` 中的YOLO类别名称和工具偏移；
+2. `config/tool_offsets.yaml` 中的目标选择模式、指定工件和工具偏移；
 3. `target_matching.source_image_width/height` 是否与后台矩形坐标使用的原图尺寸一致；
 4. 相机、机器人和Windows电脑位于可互通的网段；
 5. Windows防火墙允许TCP端口 `48051`。
@@ -99,7 +99,7 @@ TCP解算的字段、坐标单位和 `live` 模式见 [INTERFACE.md](INTERFACE.m
 
 ## 6. 工具偏移热更新
 
-服务运行时直接编辑并保存 `config/tool_offsets.yaml`。下一次 `/get_tcp_pose` 会读取新值，无需重启服务。可以在 `service.log` 中核对 `工具偏移xyz`、`rpy` 和配置SHA-256。Windows可直接运行 `calibrate_tool_offset.py`；`run_tool_calibration.sh` 是Ubuntu Bash包装脚本。
+服务运行时直接编辑并保存 `config/tool_offsets.yaml`。下一次 `/get_tcp_pose` 会读取新的工具偏移、`target_selection.use_yolo` 和 `selected_tool`，无需重启服务。可以在 `service.log` 中核对目标模式、指定工件、工具偏移和配置SHA-256。Windows可直接运行 `calibrate_tool_offset.py`；`run_tool_calibration.sh` 是Ubuntu Bash包装脚本。
 
 只有工具文件支持热更新。修改 `workflow.yaml`、模型、相机标定或手眼标定后必须重启服务。工具文件语法或数值无效时，本次请求返回500且不会沿用旧参数；修复后直接重试。
 

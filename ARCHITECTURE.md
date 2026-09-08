@@ -11,8 +11,8 @@ VisionHttpProtocol（字段检查、rad/deg转换）
     ↓
 vision-task-worker（单线程串行执行所有视觉任务）
     ├─ CameraManager → SurfacePro50SyncAdapter
-    ├─ YoloTargetDetector
-    ├─ 平面拟合与目标匹配
+    ├─ YoloTargetDetector（YOLO或请求框中心二选一）
+    ├─ 平面拟合与可选YOLO目标匹配
     ├─ ToolOffsetsLoader → 每次读取config/tool_offsets.yaml
     └─ TargetPoseSolver
 ```
@@ -51,6 +51,20 @@ POST /get_tcp_pose（live=true）
     → 返回目标TCP
 ```
 
+采集完成后，服务先热加载 `tool_offsets.yaml` 决定目标选择分支：
+
+```text
+use_yolo=true
+    → YOLO检测/分类
+    → 请求框中心匹配最近YOLO中心
+    → 使用识别类别选择工具
+
+use_yolo=false
+    → 不执行YOLO推理
+    → 请求target框中心射线与安装平面求交
+    → 只使用selected_tool指定的工件
+```
+
 两步流程中，从快照拍摄到提交解算前不得移动机械臂、相机或目标。实时流程中，请求里的 `pos` 必须是本次采集时的实际 JAKA TCP。
 
 ## 坐标解算链
@@ -74,7 +88,7 @@ standard_to_tool
 
 ## 工具配置热加载边界
 
-服务初始化时只连接一次相机、创建一个YOLO实例并加载一次手眼矩阵。每次目标检测完成后、调用 `TargetPoseSolver` 前，`vision_solver/api.py` 会完整读取并校验 `config/tool_offsets.yaml`。读取成功后，该份不可混用的快照贯穿本次位姿计算；下一次请求再读新文件。
+服务初始化时只连接一次相机、创建一个检测器实例并加载一次手眼矩阵。每次采集完成后、目标选择前，`vision_solver/api.py` 会完整读取并校验 `config/tool_offsets.yaml`。读取成功后，该份不可混用的快照同时决定目标选择模式、指定工件和工具偏移，并贯穿本次位姿计算；下一次请求再读新文件。初始为框中心模式时跳过YOLO预加载，热切回YOLO后由首次YOLO请求按需加载模型。
 
 热加载失败只终止当前请求，不关闭相机或服务，也不会退回上一次旧参数。这样可以避免操作员已经保存新值、机械臂却仍按旧值运动。工具文件修复后可直接再次请求。
 
@@ -89,7 +103,7 @@ standard_to_tool
 | `vision_solver/config.py` | 主配置加载、独立工具文件热读取与严格校验 |
 | `vision_solver/camera.py` | 旧项目直接取流方式的长期连接包装 |
 | `handeye_calib/surfacepro50_adapter.py` | SurfacePro50/OpenNI底层适配器 |
-| `vision_solver/target_matcher.py` | 标注矩形与YOLO目标匹配 |
+| `vision_solver/target_matcher.py` | YOLO模式下标注矩形与检测目标匹配 |
 | `vision_solver/pose_solver.py` | 光心参考、逆手眼、标准TCP、工具偏移和最终TCP |
 | `config/tool_offsets.yaml` | 可在服务运行中修改的工具工作位偏移 |
 | `calibrate_tool_offset.py` | 基于标准TCP标定工具偏移 |

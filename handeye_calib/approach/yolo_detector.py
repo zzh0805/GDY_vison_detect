@@ -39,6 +39,8 @@ class YoloTargetDetector:
 
     detector_name = "ultralytics_yolo_pointcloud"
     detector_version = "1.1.0"
+    box_center_detector_name = "request_box_center_pointcloud"
+    box_center_detector_version = "1.0.0"
 
     def __init__(
             self,
@@ -665,6 +667,157 @@ class YoloTargetDetector:
             detector_name=self.detector_name,
             detector_version=self.detector_version,
             observations=tuple(observations),
+            processing_time_ms=(time.perf_counter() - started) * 1000.0,
+            errors=tuple(errors),
+            debug_overlay=overlay,
+        )
+
+    def process_box_center(
+            self, frame: CameraFrame, camera_model: CameraModel,
+            request_id: str, target_region_px: np.ndarray,
+            selected_tool: str,
+            panel_region_px: Optional[np.ndarray] = None,
+    ) -> TargetDetectionBatch:
+        """跳过YOLO，以请求框中心像素恢复唯一目标的三维几何。
+
+        ``selected_tool`` 同时作为该唯一观测的类别名，使后续位姿链可以
+        原样复用现有的 ``tools.<类别>.standard_to_tool`` 配置。
+        """
+        started = time.perf_counter()
+        validate_frame_channels(frame, self.required_channels())
+        color = np.asarray(frame.color)
+        cloud = np.asarray(frame.point_cloud)
+        if color.shape[:2] != (camera_model.height, camera_model.width):
+            raise ValueError("彩色图尺寸与 CameraModel 不一致")
+        if cloud.ndim != 3 or cloud.shape[2] < 3:
+            raise ValueError(f"point_cloud 必须为 HxWx3，实际 {cloud.shape}")
+        metadata = dict(frame.metadata or {})
+        if self.require_handeye_compatible_cloud and not bool(
+                metadata.get("point_cloud_handeye_compatible", False)):
+            raise ValueError(
+                "点云未确认与标定彩色相机坐标系兼容，禁止计算机器人目标")
+        scale_to_m = self._point_scale_to_m(metadata)
+        pixel_aligned = bool(metadata.get(
+            "point_cloud_pixel_aligned_to_image",
+            cloud.shape[:2] == color.shape[:2]))
+        projected_cloud = None
+        if pixel_aligned:
+            if cloud.shape[:2] != color.shape[:2]:
+                raise ValueError(
+                    "点云声明为像素对齐，但尺寸 "
+                    f"{cloud.shape[:2]} 与彩色图 {color.shape[:2]} 不一致")
+        else:
+            projected_cloud = self._project_cloud_to_image(cloud, camera_model)
+
+        tool_name = str(selected_tool or "").strip()
+        if not tool_name:
+            raise ValueError("框中心模式缺少指定工件")
+        corners = np.asarray(target_region_px, dtype=np.float64).reshape(-1, 2)
+        if corners.shape != (4, 2) or not np.isfinite(corners).all():
+            raise ValueError("目标框必须是4个有限像素角点")
+        x1, y1 = np.min(corners, axis=0)
+        x2, y2 = np.max(corners, axis=0)
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError("目标框为空")
+        center_px = np.array(
+            [(x1 + x2) * 0.5, (y1 + y2) * 0.5], dtype=np.float64)
+        detection = Yolo2DDetection(
+            instance_id=f"manual_{frame.frame_id:06d}",
+            class_id=-1,
+            class_name=tool_name,
+            confidence=1.0,
+            xywh_px=np.array([
+                center_px[0], center_px[1], x2 - x1, y2 - y1],
+                dtype=np.float64),
+            xyxy_px=np.array([x1, y1, x2, y2], dtype=np.float64),
+        )
+        overlay = color.copy()
+        errors = []
+        panel_plane = None
+        try:
+            if panel_region_px is not None:
+                panel_plane = self._fit_panel_plane(
+                    cloud, panel_region_px, scale_to_m, camera_model,
+                    projected_cloud, (detection,))
+            center, normal, tangent, metrics = self._geometry_from_box(
+                cloud, detection, scale_to_m, camera_model, projected_cloud,
+                all_detections=(detection,), panel_plane=panel_plane)
+            center_source = str(metrics.get("center_depth_source") or "")
+            metrics["center_depth_source"] = center_source.replace(
+                "yolo_center", "request_box_center")
+            metrics.update({
+                "target_selection_mode": "box_center",
+                "request_box_corners_px": corners.tolist(),
+                "request_box_center_px": center_px.tolist(),
+                "configured_tool": tool_name,
+            })
+            observation = TargetObservation(
+                request_id=request_id,
+                frame_id=frame.frame_id,
+                instance_id=detection.instance_id,
+                class_id=-1,
+                class_name=tool_name,
+                confidence=1.0,
+                valid=True,
+                center_camera_m=center,
+                surface_normal_camera=normal,
+                approach_direction_camera=-normal,
+                tangent_x_camera=tangent,
+                T_camera_target=self._target_transform(center, normal, tangent),
+                bbox_2d=tuple(float(x) for x in detection.xyxy_px),
+                quality_metrics=metrics,
+                detector_name=self.box_center_detector_name,
+                detector_version=self.box_center_detector_version,
+            )
+            color_box = (0, 220, 0)
+            self._draw_normal(overlay, center, normal, camera_model)
+            if self.plane_region_mode == "surrounding_panel":
+                outer_value = metrics.get("plane_outer_bbox_xyxy_px")
+                if outer_value is not None:
+                    outer = np.rint(outer_value).astype(int)
+                    cv2.rectangle(
+                        overlay, (outer[0], outer[1]),
+                        (outer[2], outer[3]), (255, 255, 0), 1)
+        except Exception as exc:
+            message = f"请求框中心三维恢复失败: {exc}"
+            errors.append(message)
+            observation = TargetObservation(
+                request_id=request_id,
+                frame_id=frame.frame_id,
+                instance_id=detection.instance_id,
+                class_id=-1,
+                class_name=tool_name,
+                confidence=1.0,
+                valid=False,
+                bbox_2d=tuple(float(x) for x in detection.xyxy_px),
+                quality_metrics={
+                    "target_selection_mode": "box_center",
+                    "request_box_corners_px": corners.tolist(),
+                    "request_box_center_px": center_px.tolist(),
+                    "configured_tool": tool_name,
+                },
+                detector_name=self.box_center_detector_name,
+                detector_version=self.box_center_detector_version,
+                error_code="GEOMETRY_RECOVERY_FAILED",
+                error_message=message,
+            )
+            color_box = (0, 0, 255)
+
+        polygon = np.rint(corners).astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(overlay, [polygon], True, color_box, 2, cv2.LINE_AA)
+        center_i = tuple(np.rint(center_px).astype(int))
+        cv2.circle(overlay, center_i, 5, (0, 255, 255), -1)
+        cv2.putText(
+            overlay, f"box-center:{tool_name}",
+            (int(round(x1)), max(20, int(round(y1)) - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color_box, 2, cv2.LINE_AA)
+        return TargetDetectionBatch(
+            request_id=request_id,
+            frame_id=frame.frame_id,
+            timestamp=frame.timestamp,
+            detector_name=self.box_center_detector_name,
+            detector_version=self.box_center_detector_version,
+            observations=(observation,),
             processing_time_ms=(time.perf_counter() - started) * 1000.0,
             errors=tuple(errors),
             debug_overlay=overlay,

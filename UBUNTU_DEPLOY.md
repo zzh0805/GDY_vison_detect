@@ -41,7 +41,8 @@ python -m pip install -r requirements.txt
 5. `snapshot_delay_s=4`、`live_capture_delay_s=4`；这两个时段会主动丢弃旧帧，并确认请求超时大于丢帧、最终拍照和检测总耗时；
 6. `pipeline_version=2`，且 `standoff_mm`、`tcp_correction` 使用本套机械结构对应的标定值；
 7. `tool_offsets.file` 指向有效工具文件，工具类别及 `standard_to_tool` 正确；
-8. 输出目录有写权限和足够空间。
+8. `target_selection.use_yolo` 符合现场模式；关闭YOLO时 `selected_tool` 必须是已启用的 `tools` 键；
+9. 输出目录有写权限和足够空间。
 
 检查网络和文件：
 
@@ -62,7 +63,7 @@ pgrep -af 'run_service.py'
 bash run_service.sh
 ```
 
-应依次看到标定加载、YOLO加载、相机连接成功以及端口监听日志。另开终端验证：
+YOLO模式应看到模型准备日志；框中心模式应看到“跳过YOLO启动预加载”。随后应看到相机连接成功及端口监听日志。另开终端验证：
 
 ```bash
 ss -tlnp | grep ':48051 '
@@ -71,7 +72,7 @@ curl -X POST http://127.0.0.1:48051/snapshot
 
 首次只验证拍照和返回坐标，不执行机械臂运动。先用零偏移类别确认返回的是“逆手眼+全局修正”的50mm标准TCP，再低速验证迁移后的按钮工具位。
 
-服务运行期间修改 `config/tool_offsets.yaml` 后无需重启。下一次 `/get_tcp_pose` 自动使用新值；若文件格式错误，该请求返回500并拒绝输出旧偏移结果，修正后直接重试。
+服务运行期间修改 `config/tool_offsets.yaml` 后无需重启。工具偏移、`use_yolo` 和 `selected_tool` 都在下一次 `/get_tcp_pose` 自动生效；若文件格式错误，该请求返回500并拒绝输出旧偏移结果，修正后直接重试。
 
 在Ubuntu上标定或微调工具时，修改 `run_tool_calibration.sh` 顶部用户参数区并运行：
 

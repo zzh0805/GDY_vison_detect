@@ -12,6 +12,13 @@
 
 ## 当前版本
 
+`v3.3.0`（2026-09-08）更新内容：
+
+- 在 `config/tool_offsets.yaml` 新增热加载的 `target_selection.use_yolo` 与 `target_selection.selected_tool`；
+- `use_yolo: false` 时完全跳过YOLO推理，以请求中 `target` 矩形的几何中心作为唯一目标中心；
+- 框中心模式每次只使用 `selected_tool` 指定的工件及其工具偏移，即使该工件不在YOLO模型类别中也能解算；
+- `/snapshot`、`/get_tcp_pose` 的请求及成功响应格式保持不变；模式和指定工件修改后无需重启服务。
+
 `v3.2.0`（2026-09-07）更新内容：
 
 - 用持续消费原始彩色/深度帧替代服务端纯 `sleep`，降低导航空闲期间OpenNI2积压帧进入解算的风险；
@@ -30,7 +37,7 @@
 ## 项目功能
 
 - 长期独占连接一台SurfacePro50，只在收到请求时采集彩色图和配准点云；
-- 使用YOLO识别目标类别并将客户端矩形匹配到最近目标；
+- 支持YOLO识别并匹配目标，也支持完全跳过YOLO、直接使用客户端框中心；
 - 使用目标外围安装平面的点云拟合中心和法向，避免依赖目标自身深度；
 - 根据拍照TCP、手眼标定、50 mm光心参考位和全局修正计算标准活动TCP；
 - 按目标类别叠加工具固定偏移，返回JAKA基座系最终活动TCP；
@@ -69,7 +76,7 @@
 拍照TCP × T_tcp_camera → 拍照相机位姿
 光心参考位姿 × inverse(T_tcp_camera) → 逆手眼活动TCP
 逆手眼活动TCP + pose.tcp_correction → 标准活动TCP
-每次读取tool_offsets.yaml中的tools.<类别>.standard_to_tool
+每次读取tool_offsets.yaml中的目标模式及tools.<选定工件>.standard_to_tool
 标准活动TCP × standard_to_tool → 最终工作TCP
 ```
 
@@ -77,7 +84,17 @@
 
 ## 工具标定热更新
 
-服务启动后可直接修改 [config/tool_offsets.yaml](config/tool_offsets.yaml)。下一次 `/get_tcp_pose` 会在确定YOLO类别后重新读取并校验整个文件，然后才计算最终TCP。相机连接、YOLO模型、手眼矩阵和 `pose.tcp_correction` 不会重新初始化。
+服务启动后可直接修改 [config/tool_offsets.yaml](config/tool_offsets.yaml)。下一次 `/get_tcp_pose` 会在目标选择和位姿计算前重新读取并校验整个文件。相机连接、手眼矩阵和 `pose.tcp_correction` 不会重新初始化；若从框中心模式热切换回YOLO，模型会在首次YOLO请求时按需准备。
+
+目标选择的两个开关如下：
+
+```yaml
+target_selection:
+  use_yolo: false
+  selected_tool: redkonb
+```
+
+`use_yolo: true` 保持原有“YOLO中心与请求框匹配”流程，此时 `selected_tool` 不参与选择。`use_yolo: false` 时不调用YOLO，直接使用请求 `target` 框的中心像素，并把 `selected_tool` 作为本次唯一工件。该名称必须是同一文件 `tools:` 下已启用的键；要使用对应工具偏移，还应保持 `workflow.yaml` 的 `pose.alignment_mode: tool`。
 
 如果文件存在YAML语法错误、缺少类别、数组不是3个有限数字或仍使用v1字段 `camera_to_tool`，本次请求会失败并且不会沿用旧偏移。修正文件后直接重试即可，不需要重启服务。`service.log` 和保存的 `result.json` 会记录本次实际使用的数值及文件SHA-256。
 
@@ -104,7 +121,7 @@ cp linux_sdk_paths.env.example linux_sdk_paths.env
 bash run_service.sh
 ```
 
-确认相机、YOLO和端口均初始化成功后，可改为后台运行：
+确认相机、目标选择模式和端口均初始化成功后，可改为后台运行：
 
 ```bash
 bash start_vision_service.sh

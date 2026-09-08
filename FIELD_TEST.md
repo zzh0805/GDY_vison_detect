@@ -57,6 +57,16 @@ bash run_field_test.sh --live
 
 服务会在收到这个实时解算请求后，于 `http.live_capture_delay_s`（当前4秒）内持续读取并丢弃旧的原始彩色/深度帧，再拍照、检测和解算。该时段替代原来的纯等待，期间机械臂、相机和目标必须保持静止。
 
+测试YOLO模型中不存在的工件时，可先在 `config/tool_offsets.yaml` 中设置：
+
+```yaml
+target_selection:
+  use_yolo: false
+  selected_tool: your_tool_key
+```
+
+其中 `your_tool_key` 必须已经存在于同一文件的 `tools:` 下并启用。保存后直接再次运行现场测试，不需要重启服务。此时传入矩形的中心就是目标中心，不会再从YOLO框中二次匹配；若要应用该工件偏移，确认 `workflow.yaml` 使用 `pose.alignment_mode: tool`。
+
 只有在坐标、角度单位、方向和安全距离全部人工确认后，才可以将 `work_jaka` 改为 `true`。
 
 对于零偏移类别，`result.json` 中应满足 `targetTcpMmRpyDeg == cameraReference.standardTcpMmRpyDeg`。按钮类别则应在标准TCP之后叠加迁移后的 `standard_to_tool`。

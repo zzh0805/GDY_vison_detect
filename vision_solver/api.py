@@ -17,7 +17,7 @@ from .camera import CameraManager
 from .config import AppConfig, load_config, load_tool_offsets
 from .image_writer import ArtifactWriter
 from .logging_utils import get_logger
-from .models import (AnnotationCaptureRequest, SolveTargetRequest,
+from .models import (AnnotationCaptureRequest, MatchResult, SolveTargetRequest,
                      TaskError, json_ready)
 from .pose_solver import TargetPoseSolver
 from .target_matcher import match_observation, scale_request_corners
@@ -103,23 +103,32 @@ class VisionToolTcpSolver:
                         plane.get("exclude_box_margin_ratio", 0.15)),
                     require_handeye_compatible_cloud=True,
                 )
-            if bool(self.config.yolo.get("load_model_at_start", True)):
+            tool_offsets = load_tool_offsets(self.tool_offsets_path)
+            if (tool_offsets.use_yolo and
+                    bool(self.config.yolo.get("load_model_at_start", True))):
                 ensure_model = getattr(self.detector, "_ensure_model", None)
                 if callable(ensure_model):
                     ensure_model()
             yolo_cfg = self.config.yolo
-            log.info("YOLO模型加载: %s device=%s 类别=%s (%.1fs)",
-                     self.config.resolve_path(yolo_cfg.get("model_file")),
-                     yolo_cfg.get("device") or "auto",
-                     sorted(self.detector.class_names or ()) or "全部",
-                     time.perf_counter() - step_started)
+            if tool_offsets.use_yolo:
+                log.info("YOLO模型准备: %s device=%s 类别=%s (%.1fs)",
+                         self.config.resolve_path(yolo_cfg.get("model_file")),
+                         yolo_cfg.get("device") or "auto",
+                         sorted(self.detector.class_names or ()) or "全部",
+                         time.perf_counter() - step_started)
+            else:
+                log.info(
+                    "框中心模式已启用: 跳过YOLO启动预加载，指定工件=%s",
+                    tool_offsets.selected_tool)
             step_started = time.perf_counter()
-            tool_offsets = load_tool_offsets(self.tool_offsets_path)
             self.pose_solver = TargetPoseSolver(
                 self.calibration, self.config.pose, tool_offsets.tools)
             log.info(
-                "工具偏移配置加载: %s 类别=%d sha256=%s",
+                "工具偏移配置加载: %s 类别=%d use_yolo=%s "
+                "selected_tool=%s sha256=%s",
                 tool_offsets.source_path, len(tool_offsets.tools),
+                tool_offsets.use_yolo,
+                tool_offsets.selected_tool or "-",
                 tool_offsets.sha256[:12])
             cam_cfg = self.config.camera
             log.info("相机连接: type=%s ip=%s",
@@ -261,6 +270,10 @@ class VisionToolTcpSolver:
         matching = self.config.matching
         source_width = int(matching.get("source_image_width", 1920))
         source_height = int(matching.get("source_image_height", 1080))
+        corners = scale_request_corners(
+            request.target_corners_px,
+            source_width, source_height,
+            camera_model.width, camera_model.height)
         # 基座面板矩形（可选）：提供时目标中心深度以面板平面为准。
         panel_region_px = None
         if request.base_corners_px is not None:
@@ -268,53 +281,79 @@ class VisionToolTcpSolver:
                 request.base_corners_px,
                 source_width, source_height,
                 camera_model.width, camera_model.height)
-        step = time.perf_counter()
-        batch = self.detector.process(
-            frame, camera_model, request.task_id,
-            panel_region_px=panel_region_px)
-        log.info("检测: YOLO目标数=%d 有效解算=%d 耗时=%.1fms",
-                 len(batch.observations),
-                 len(batch.valid_observations()),
-                 (time.perf_counter() - step) * 1000.0)
-        for error_text in batch.errors:
-            log.warning("检测告警: %s", error_text)
-        corners = scale_request_corners(
-            request.target_corners_px,
-            source_width, source_height,
-            camera_model.width, camera_model.height)
-        distance_scale = 0.5 * (
-            camera_model.width / float(source_width) +
-            camera_model.height / float(source_height))
-        match = match_observation(
-            batch.observations,
-            corners,
-            prefer_inside=bool(
-                matching.get("prefer_center_inside_polygon", True)),
-            max_distance_px=float(
-                matching.get("max_match_distance_px", 300.0)) * distance_scale,
-        )
-        observation = match.observation
-        if not observation.valid:
-            log.error("解算失败: %s %s",
-                      observation.error_code or "TARGET_GEOMETRY_FAILED",
-                      observation.error_message or "三维几何解算失败")
-            raise TaskError(
-                observation.error_code or "TARGET_GEOMETRY_FAILED",
-                observation.error_message or "最近的YOLO目标三维几何解算失败")
-        log.info("匹配: 类别=%s 置信度=%.2f 距离=%.1fpx 中心在框内=%s",
-                 observation.class_name,
-                 float(observation.confidence),
-                 match.distance_px,
-                 match.center_inside_polygon)
         try:
-            # v3热加载边界：只重读工具映射；相机、YOLO、手眼矩阵和
-            # tcp_correction继续使用服务启动时已经验证并初始化的配置。
+            # v3.3热加载边界：目标选择模式、固定工件和工具偏移在每次
+            # 解算时读取；相机、模型、手眼矩阵和全局修正不重新初始化。
             tool_offsets = load_tool_offsets(self.tool_offsets_path)
         except (OSError, TypeError, ValueError) as exc:
             log.error("工具偏移配置热加载失败: %s", exc, exc_info=True)
             raise TaskError(
                 "TOOL_CONFIG_RELOAD_FAILED",
                 f"工具偏移配置读取或校验失败: {exc}") from exc
+
+        step = time.perf_counter()
+        if tool_offsets.use_yolo:
+            selection_mode = "yolo"
+            batch = self.detector.process(
+                frame, camera_model, request.task_id,
+                panel_region_px=panel_region_px)
+            log.info("检测: 模式=YOLO 目标数=%d 有效解算=%d 耗时=%.1fms",
+                     len(batch.observations),
+                     len(batch.valid_observations()),
+                     (time.perf_counter() - step) * 1000.0)
+            distance_scale = 0.5 * (
+                camera_model.width / float(source_width) +
+                camera_model.height / float(source_height))
+            match = match_observation(
+                batch.observations,
+                corners,
+                prefer_inside=bool(
+                    matching.get("prefer_center_inside_polygon", True)),
+                max_distance_px=float(
+                    matching.get("max_match_distance_px", 300.0)) *
+                distance_scale,
+            )
+            observation = match.observation
+        else:
+            selection_mode = "box_center"
+            batch = self.detector.process_box_center(
+                frame, camera_model, request.task_id,
+                target_region_px=corners,
+                selected_tool=tool_offsets.selected_tool,
+                panel_region_px=panel_region_px)
+            observation = batch.observations[0]
+            request_center = np.mean(corners, axis=0)
+            match = MatchResult(
+                observation=observation,
+                request_center_px=request_center,
+                detection_center_px=request_center.copy(),
+                distance_px=0.0,
+                center_inside_polygon=True,
+                ordered_corners_px=corners,
+            )
+            log.info(
+                "检测: 模式=框中心 指定工件=%s 中心=%s 有效解算=%d "
+                "耗时=%.1fms（未执行YOLO推理）",
+                tool_offsets.selected_tool,
+                np.round(request_center, 2).tolist(),
+                len(batch.valid_observations()),
+                (time.perf_counter() - step) * 1000.0)
+        for error_text in batch.errors:
+            log.warning("检测告警: %s", error_text)
+        if not observation.valid:
+            log.error("解算失败: %s %s",
+                      observation.error_code or "TARGET_GEOMETRY_FAILED",
+                      observation.error_message or "三维几何解算失败")
+            raise TaskError(
+                observation.error_code or "TARGET_GEOMETRY_FAILED",
+                observation.error_message or "目标三维几何解算失败")
+        log.info("目标选择: 模式=%s 类别=%s 置信度=%.2f 距离=%.1fpx "
+                 "中心在框内=%s",
+                 selection_mode,
+                 observation.class_name,
+                 float(observation.confidence),
+                 match.distance_px,
+                 match.center_inside_polygon)
         pose = self.pose_solver.solve(
             observation, request.capture_tcp_mm_rpy_deg,
             tools_config=tool_offsets.tools)
@@ -341,8 +380,10 @@ class VisionToolTcpSolver:
                   if plane_dist is not None else float("nan")),
                  (float(ray_dist) * 1000.0
                   if ray_dist is not None else float("nan")))
-        log.info("v3求解: 类别=%s 工具=%s 光心参考距离=%.1fmm "
+        log.info("v3.3求解: 目标模式=%s 类别=%s 工具=%s "
+                 "光心参考距离=%.1fmm "
                  "工具偏移xyz=%s rpy=%s 配置sha256=%s 标准TCP=%s 最终TCP=%s",
+                 selection_mode,
                  observation.class_name,
                  pose["toolId"],
                  float(pose["standoffMm"]),
@@ -362,6 +403,16 @@ class VisionToolTcpSolver:
             "selectedClassId": observation.class_id,
             "selectedConfidence": observation.confidence,
             "toolId": pose["toolId"],
+            "targetSelection": {
+                "mode": selection_mode,
+                "useYolo": tool_offsets.use_yolo,
+                "configuredTool": (
+                    tool_offsets.selected_tool
+                    if not tool_offsets.use_yolo else None),
+                "centerSource": (
+                    "yolo_detection_center"
+                    if tool_offsets.use_yolo else "request_box_center"),
+            },
             "toolOffsetsHotReload": {
                 "sourcePath": str(tool_offsets.source_path),
                 "sha256": tool_offsets.sha256,

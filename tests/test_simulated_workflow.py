@@ -14,6 +14,7 @@ import yaml
 from handeye_calib.hardware_interfaces import CameraFrame
 from handeye_calib.approach.yolo_detector import YoloTargetDetector
 from vision_tool_tcp_api import VisionToolTcpSolver
+from vision_solver.config import load_tool_offsets
 from vision_solver.http_client import VisionHttpClient
 from vision_solver.http_protocol import VisionHttpProtocol
 from vision_solver.http_server import VisionHttpServer
@@ -43,7 +44,11 @@ class FakeResult:
 class FakeModel:
     names = {0: "panel", 1: "other"}
 
+    def __init__(self):
+        self.predict_calls = 0
+
     def predict(self, **_kwargs):
+        self.predict_calls += 1
         return [FakeResult()]
 
 
@@ -111,9 +116,9 @@ class FakeCamera:
         return 3
 
 
-def fake_detector() -> YoloTargetDetector:
+def fake_detector(model=None) -> YoloTargetDetector:
     return YoloTargetDetector(
-        "unused.pt", model=FakeModel(),
+        "unused.pt", model=model or FakeModel(),
         confidence=0.5,
         min_plane_points=50,
         max_plane_sample_points=5000,
@@ -142,10 +147,16 @@ class SimulatedWorkflowTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def write_tool_offsets(self, x_offset_mm: float = 100.0) -> None:
+    def write_tool_offsets(self, x_offset_mm: float = 100.0,
+                           use_yolo: bool = True,
+                           selected_tool: str = "panel") -> None:
         self.tool_offsets_path.write_text(
             yaml.safe_dump({
                 "version": 1,
+                "target_selection": {
+                    "use_yolo": use_yolo,
+                    "selected_tool": selected_tool,
+                },
                 "tools": {
                     "panel": {
                         "tool_id": "tool-panel",
@@ -161,8 +172,11 @@ class SimulatedWorkflowTests(unittest.TestCase):
 
     def write_config(self, alignment_mode: str,
                      live_capture_delay_s: float = 0.0,
-                     snapshot_delay_s: float = 0.0) -> None:
-        self.write_tool_offsets()
+                     snapshot_delay_s: float = 0.0,
+                     use_yolo: bool = True,
+                     selected_tool: str = "panel") -> None:
+        self.write_tool_offsets(
+            use_yolo=use_yolo, selected_tool=selected_tool)
         data = {
             "system": {
                 "initialization_timeout_s": 5,
@@ -234,12 +248,17 @@ class SimulatedWorkflowTests(unittest.TestCase):
     @contextmanager
     def http_service(self, alignment_mode="camera_center",
                      live_capture_delay_s=0.0,
-                     snapshot_delay_s=0.0):
+                     snapshot_delay_s=0.0,
+                     use_yolo=True,
+                     selected_tool="panel"):
         self.write_config(
-            alignment_mode, live_capture_delay_s, snapshot_delay_s)
+            alignment_mode, live_capture_delay_s, snapshot_delay_s,
+            use_yolo, selected_tool)
         camera = FakeCamera()
+        model = FakeModel()
+        camera.yolo_model = model
         solver = VisionToolTcpSolver(
-            self.config_path, camera=camera, detector=fake_detector())
+            self.config_path, camera=camera, detector=fake_detector(model))
         server = VisionHttpServer(
             VisionHttpProtocol(solver), "127.0.0.1", 0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -343,6 +362,53 @@ class SimulatedWorkflowTests(unittest.TestCase):
         self.assertTrue(np.allclose(
             solved["pos"], [100, 0, 950, 0, 0, 0],
             atol=1e-5))
+
+    def test_box_center_mode_skips_yolo_and_uses_configured_tool(self):
+        # 请求框中心为(80,50)，相机内参对应平面交点(300,0,1000)mm；
+        # 50mm悬停后再叠加panel工具局部X+100mm。
+        with self.http_service(
+                "tool", use_yolo=False, selected_tool="panel"
+        ) as (client, camera):
+            solved = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 75, 45, 85, 55, live=True)
+
+        self.assertEqual(set(solved), {"code", "pos"})
+        self.assertEqual(solved["code"], 200, solved)
+        self.assertTrue(np.allclose(
+            solved["pos"], [400, 0, 950, 0, 0, 0], atol=1e-5))
+        self.assertEqual(camera.yolo_model.predict_calls, 0)
+
+    def test_target_selection_mode_is_hot_reloaded(self):
+        with self.http_service("tool") as (client, camera):
+            first = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 40, 40, 60, 60, live=True)
+            self.write_tool_offsets(
+                x_offset_mm=100.0, use_yolo=False,
+                selected_tool="panel")
+            second = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 75, 45, 85, 55, live=True)
+
+        self.assertEqual(first["code"], 200, first)
+        self.assertEqual(second["code"], 200, second)
+        self.assertTrue(np.allclose(
+            second["pos"], [400, 0, 950, 0, 0, 0], atol=1e-5))
+        self.assertEqual(camera.yolo_model.predict_calls, 1)
+
+    def test_box_center_mode_requires_existing_enabled_tool(self):
+        self.write_tool_offsets(use_yolo=False, selected_tool="missing")
+        with self.assertRaisesRegex(ValueError, "未在tools中定义"):
+            load_tool_offsets(self.tool_offsets_path)
+
+    def test_v32_tool_file_without_target_selection_defaults_to_yolo(self):
+        data = yaml.safe_load(
+            self.tool_offsets_path.read_text(encoding="utf-8"))
+        data.pop("target_selection")
+        self.tool_offsets_path.write_text(
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+            encoding="utf-8")
+        snapshot = load_tool_offsets(self.tool_offsets_path)
+        self.assertTrue(snapshot.use_yolo)
+        self.assertEqual(snapshot.selected_tool, "")
 
     def test_tool_offset_file_is_reloaded_without_restarting_service(self):
         with self.http_service("tool") as (client, camera):

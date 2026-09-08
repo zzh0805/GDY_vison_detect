@@ -5,13 +5,22 @@
 # xyz_mm是标准TCP局部坐标系中的毫米位移，rpy_deg为JAKA RPY角度。
 version: 1
 
+# v3.3目标选择（每次解算热加载，修改后不需要重启服务）：
+# use_yolo: true  -> 保持原流程，用YOLO检测中心匹配请求框。
+# use_yolo: false -> 完全跳过YOLO，以请求target框的几何中心作为目标中心；
+#                    每次都使用selected_tool指定的工件/工具偏移。
+# selected_tool必须与下方tools中的键完全一致，且该项enabled必须为true。
+target_selection:
+  use_yolo: true
+  selected_tool: redkonb
+
 tools:
   greenbtn:
     tool_id: tool_green_button
     enabled: true
     # 由v1现场示教结果数学迁移；详见 migration/TOOL_OFFSET_MIGRATION.md。
     standard_to_tool:
-      xyz_mm: [106.130627, 56.354203, -16.391591]
+      xyz_mm: [109.525640, 52.685308, -16.277166]
       rpy_deg: [-3.005278, -4.276208, -0.141311]
 
   redbtn:
@@ -19,7 +28,7 @@ tools:
     enabled: true
     # 与greenbtn同一物理工具，共用迁移后的偏移。
     standard_to_tool:
-      xyz_mm: [106.130627, 56.354203, -16.391591]
+      xyz_mm: [109.525640, 52.685308, -16.277166]
       rpy_deg: [-3.005278, -4.276208, -0.141311]
 
   run:

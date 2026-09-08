@@ -77,6 +77,8 @@ class ToolOffsetsSnapshot:
 
     source_path: Path
     tools: Dict[str, Any]
+    use_yolo: bool
+    selected_tool: str
     sha256: str
     modified_at_unix_s: float
 
@@ -111,9 +113,30 @@ def load_tool_offsets(path: Any) -> ToolOffsetsSnapshot:
     if int(version) != 1:
         raise ValueError(f"工具偏移配置version只支持1，实际为{version!r}")
     tools = _validate_tools(data.get("tools"))
+    target_selection = _mapping(
+        data.get("target_selection"), "target_selection")
+    use_yolo = target_selection.get("use_yolo", True)
+    if not isinstance(use_yolo, bool):
+        raise ValueError("target_selection.use_yolo必须是true或false")
+    selected_tool = str(
+        target_selection.get("selected_tool") or "").strip()
+    if not use_yolo:
+        if not selected_tool:
+            raise ValueError(
+                "关闭YOLO时必须设置target_selection.selected_tool")
+        if selected_tool not in tools:
+            raise ValueError(
+                "target_selection.selected_tool未在tools中定义: "
+                f"{selected_tool!r}")
+        if not bool(tools[selected_tool].get("enabled", True)):
+            raise ValueError(
+                "target_selection.selected_tool对应工具未启用: "
+                f"{selected_tool!r}")
     return ToolOffsetsSnapshot(
         source_path=source,
         tools=tools,
+        use_yolo=use_yolo,
+        selected_tool=selected_tool,
         sha256=hashlib.sha256(payload).hexdigest(),
         modified_at_unix_s=float(after.st_mtime),
     )

@@ -66,7 +66,9 @@ curl -X POST http://127.0.0.1:48051/snapshot
 
 返回 `pos` 为 JAKA 基座系当前活动 TCP，单位仍为 `mm + RPY rad`。
 
-如果 `system.save_report=true`，磁盘 `result.json` 还会保存坐标链审计字段以及 `toolOffsetsHotReload`。后者包含本次实际读取的文件路径、SHA-256、修改时间、目标类别和实际使用的 `xyzMm/rpyDeg`。HTTP成功响应仍保持只有 `code` 与 `pos`，不影响现有客户端。
+接口字段不随目标选择模式变化。`config/tool_offsets.yaml` 中 `target_selection.use_yolo: true` 时，`target` 用于从YOLO结果中匹配目标；设为 `false` 时，YOLO完全不参与本次推理，算法直接使用这个 `target` 矩形的几何中心，并固定采用 `target_selection.selected_tool` 指定的工件。可选 `base` 仍只用于拟合安装平面。
+
+如果 `system.save_report=true`，磁盘 `result.json` 还会保存坐标链审计字段、`targetSelection` 以及 `toolOffsetsHotReload`。`targetSelection` 记录本次是 `yolo` 还是 `box_center`；后者包含实际读取的文件路径、SHA-256、修改时间、目标类别和使用的 `xyzMm/rpyDeg`。HTTP成功响应仍保持只有 `code` 与 `pos`，不影响现有客户端。
 
 `result.json` 的 `discardedFramePairsBeforeCapture` 记录本次最终采集前主动丢弃的原始彩色/深度帧对数量；服务日志也会输出相同计数。缓存解算该值为0。
 
