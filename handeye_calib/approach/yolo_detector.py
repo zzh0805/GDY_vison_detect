@@ -675,12 +675,13 @@ class YoloTargetDetector:
     def process_box_center(
             self, frame: CameraFrame, camera_model: CameraModel,
             request_id: str, target_region_px: np.ndarray,
-            selected_tool: str,
+            tool_class_name: str,
             panel_region_px: Optional[np.ndarray] = None,
     ) -> TargetDetectionBatch:
         """跳过YOLO，以请求框中心像素恢复唯一目标的三维几何。
 
-        ``selected_tool`` 同时作为该唯一观测的类别名，使后续位姿链可以
+        ``tool_class_name`` 是本次请求code动态映射出的工具类别，同时
+        作为该唯一观测的类别名，使后续位姿链可以
         原样复用现有的 ``tools.<类别>.standard_to_tool`` 配置。
         """
         started = time.perf_counter()
@@ -709,7 +710,7 @@ class YoloTargetDetector:
         else:
             projected_cloud = self._project_cloud_to_image(cloud, camera_model)
 
-        tool_name = str(selected_tool or "").strip()
+        tool_name = str(tool_class_name or "").strip()
         if not tool_name:
             raise ValueError("框中心模式缺少指定工件")
         corners = np.asarray(target_region_px, dtype=np.float64).reshape(-1, 2)

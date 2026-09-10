@@ -33,7 +33,8 @@ curl -X POST http://127.0.0.1:48051/snapshot
   "pos": [379.5, -432.0, 509.3, 1.539, -0.836, 1.536],
   "base": {"x1": 100, "y1": 100, "x2": 900, "y2": 900},
   "target": {"x1": 852, "y1": 548, "x2": 982, "y2": 679},
-  "live": true
+  "live": true,
+  "code": "9-8-1"
 }
 ```
 
@@ -42,6 +43,9 @@ curl -X POST http://127.0.0.1:48051/snapshot
 - `target`：目标矩形，坐标对应 `target_matching` 中配置的原图尺寸；
 - `live=true`：收到请求后在 `http.live_capture_delay_s`（当前4秒）内持续丢弃原始帧，再采集新帧并完成检测、解算；
 - `live=false` 或省略：使用最近一次 `/snapshot` 的缓存帧。
+- `code`：`use_yolo=false` 时必填的工件业务编码；必须与 `tools.<工件>.code` 一致。YOLO模式下可省略。
+
+注意，请求中的 `code` 是类似 `"9-8-1"` 的字符串工件编码；响应中的 `code` 是 `200/400/422` 等数字状态码，两者用途不同。
 
 兼容旧矩形字段：
 
@@ -66,9 +70,9 @@ curl -X POST http://127.0.0.1:48051/snapshot
 
 返回 `pos` 为 JAKA 基座系当前活动 TCP，单位仍为 `mm + RPY rad`。
 
-接口字段不随目标选择模式变化。`config/tool_offsets.yaml` 中 `target_selection.use_yolo: true` 时，`target` 用于从YOLO结果中匹配目标；设为 `false` 时，YOLO完全不参与本次推理，算法直接使用这个 `target` 矩形的几何中心，并固定采用 `target_selection.selected_tool` 指定的工件。可选 `base` 仍只用于拟合安装平面。
+`config/tool_offsets.yaml` 中 `target_selection.use_yolo: true` 时，`target` 用于从YOLO结果中匹配目标，`code` 不参与类别选择；设为 `false` 时，YOLO完全不参与本次推理，算法直接使用 `target` 矩形的几何中心，并根据请求 `code` 查找对应的 `tools` 工件。可选 `base` 仍只用于拟合安装平面。
 
-如果 `system.save_report=true`，磁盘 `result.json` 还会保存坐标链审计字段、`targetSelection` 以及 `toolOffsetsHotReload`。`targetSelection` 记录本次是 `yolo` 还是 `box_center`；后者包含实际读取的文件路径、SHA-256、修改时间、目标类别和使用的 `xyzMm/rpyDeg`。HTTP成功响应仍保持只有 `code` 与 `pos`，不影响现有客户端。
+如果 `system.save_report=true`，磁盘 `result.json` 还会保存坐标链审计字段、`targetSelection` 以及 `toolOffsetsHotReload`。`targetSelection` 记录本次是 `yolo` 还是 `box_center`；后者包含请求code、实际映射工件、读取的文件路径、SHA-256、修改时间和使用的 `xyzMm/rpyDeg`。HTTP成功响应仍保持只有数字 `code` 与 `pos`。
 
 `result.json` 的 `discardedFramePairsBeforeCapture` 记录本次最终采集前主动丢弃的原始彩色/深度帧对数量；服务日志也会输出相同计数。缓存解算该值为0。
 
@@ -83,7 +87,7 @@ curl -X POST http://127.0.0.1:48051/snapshot
 ```bash
 curl -X POST http://127.0.0.1:48051/get_tcp_pose \
   -H 'Content-Type: application/json;charset=UTF-8' \
-  -d '{"pos":[379.5,-432.0,509.3,1.539,-0.836,1.536],"base":{"x1":100,"y1":100,"x2":900,"y2":900},"target":{"x1":852,"y1":548,"x2":982,"y2":679},"live":true}'
+  -d '{"pos":[379.5,-432.0,509.3,1.539,-0.836,1.536],"base":{"x1":100,"y1":100,"x2":900,"y2":900},"target":{"x1":852,"y1":548,"x2":982,"y2":679},"live":true,"code":"9-8-1"}'
 ```
 
 发送请求前先读取当前 TCP，随后保持机械臂静止，直到服务完成本次采集和解算。
@@ -101,10 +105,10 @@ curl -X POST http://127.0.0.1:48051/get_tcp_pose \
 
 | code | 含义 |
 |---:|---|
-| 400 | JSON、TCP、矩形或单位错误 |
+| 400 | JSON、TCP、矩形、单位错误，或无YOLO模式缺少 `code` |
 | 404 | 没有匹配到目标 |
 | 409 | 缺少快照或缓存已过期 |
-| 422 | 点云、平面或目标位姿解算失败 |
+| 422 | 未知/禁用的工件 `code`，或点云、平面、目标位姿解算失败 |
 | 500 | 相机、内部异常或工具热加载配置无效 |
 | 504 | 任务等待超时 |
 

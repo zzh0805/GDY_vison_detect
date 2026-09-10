@@ -62,12 +62,60 @@ bash run_field_test.sh --live
 ```yaml
 target_selection:
   use_yolo: false
-  selected_tool: your_tool_key
+
+tools:
+  your_tool_key:
+    code: "9-8-1"
+    tool_id: tool_your_tool
+    enabled: true
+    standard_to_tool:
+      xyz_mm: [0.0, 0.0, 0.0]
+      rpy_deg: [0.0, 0.0, 0.0]
 ```
 
-其中 `your_tool_key` 必须已经存在于同一文件的 `tools:` 下并启用。保存后直接再次运行现场测试，不需要重启服务。此时传入矩形的中心就是目标中心，不会再从YOLO框中二次匹配；若要应用该工件偏移，确认 `workflow.yaml` 使用 `pose.alignment_mode: tool`。
+并在 `field_test/test_case.yaml` 设置本次工件：
+
+```yaml
+case:
+  code: "9-8-1"
+```
+
+也可以用命令行临时覆盖：
+
+```bash
+bash run_field_test.sh --live --base-label 5 --code 9-8-1
+```
+
+保存后直接再次运行现场测试，不需要重启服务。此时传入矩形的中心就是目标中心，不会再从YOLO框中二次匹配；服务根据请求 `code` 选择对应的已启用工件。若要应用该工件偏移，确认 `workflow.yaml` 使用 `pose.alignment_mode: tool`。
 
 只有在坐标、角度单位、方向和安全距离全部人工确认后，才可以将 `work_jaka` 改为 `true`。
+
+启用 `work_jaka` 后，运动顺序固定为：
+
+```text
+拍照位
+  → 基座X预备位（已经采用最终工作姿态）
+  → 只沿基座X直线进入最终工作TCP
+  → 只沿基座X原路退回预备位
+  → 返回拍照位
+```
+
+接近距离和方向在 `field_test/test_case.yaml` 中设置：
+
+```yaml
+jaka_test:
+  approach_offset_base_x_mm: -200.0
+```
+
+预备位计算为 `预备X = 最终X + approach_offset_base_x_mm`，Y、Z和全部RPY与最终工作TCP完全相同。`-200` 表示从最终位基座X负方向200 mm处准备，再沿基座 `+X` 进入；如果现场需要沿 `-X` 进入则改为 `+200`。绝对值就是接近距离。
+
+也可以只覆盖本次运行，不修改YAML：
+
+```bash
+bash run_field_test.sh --live --base-label 5 --code 9-8-1 --approach-x-mm -200
+```
+
+脚本从工作位返回时严格反向经过同一个预备位。每段均使用JAKA直线运动；服务本身仍然只负责解算TCP，运动仅由现场测试脚本执行。
 
 对于零偏移类别，`result.json` 中应满足 `targetTcpMmRpyDeg == cameraReference.standardTcpMmRpyDeg`。按钮类别则应在标准TCP之后叠加迁移后的 `standard_to_tool`。
 

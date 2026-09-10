@@ -17,7 +17,7 @@
 | `pose.pipeline_version` | `2` | 强制使用v2统一坐标链，防止误载v1配置 |
 | `tool_offsets.file` | `./tool_offsets.yaml` | 每次目标TCP解算重新读取的工具标定文件 |
 | `target_selection.use_yolo` | `true` | `true`使用YOLO；`false`直接使用请求框中心 |
-| `target_selection.selected_tool` | `redkonb` | 框中心模式固定使用的 `tools` 键名 |
+| `tools.<工件>.code` | 例如 `9-8-1` | 无YOLO模式由请求code动态选择工件；每个值必须唯一 |
 | `target_matching.source_image_width/height` | `1920/1080` | 客户端框选坐标对应的原图尺寸 |
 
 如果更换相机、相机与法兰的安装关系、活动TCP或工具安装位置，必须重新验证相机标定、手眼标定及 `standard_to_tool`，不能只改IP。
@@ -71,7 +71,7 @@ HTTP输入和输出均为 JAKA 基座系 `mm + RPY rad`。算法内部及 YAML �
 1. 使用实时目标中心和面板法向建立光心参考位姿，距离为 `standoff_mm`；
 2. 计算 `T_base_camera_reference @ inverse(T_tcp_camera)`，得到逆手眼活动TCP；
 3. 将 `pose.tcp_correction` 作为基座系 `mm + RPY°` 分量修正施加一次，形成标准活动TCP；
-4. 重新读取 `tool_offsets.file`：YOLO模式按识别类别选工具，框中心模式按 `selected_tool` 选工具；
+4. 重新读取 `tool_offsets.file`：YOLO模式按识别类别选工具，框中心模式按本次请求 `code` 选工具；
 5. 计算 `T_base_tcp_standard @ T_standard_tool`，得到最终活动TCP。
 
 `pose.tcp_correction`不得在最终工具TCP上再次叠加。工具偏移的数值以 `config/tool_offsets.yaml` 当前内容为准。
@@ -92,9 +92,9 @@ v3拒绝加载旧字段 `camera_to_tool`，以免把旧综合参数误当成新�
 version: 1
 target_selection:
   use_yolo: true
-  selected_tool: redkonb
 tools:
   class_name:
+    code: "9-8-1"
     tool_id: tool_name
     enabled: true
     standard_to_tool:
@@ -106,12 +106,13 @@ tools:
 
 ### 目标选择模式
 
-- `use_yolo: true`：保持原有流程。YOLO先检测并分类，再用请求 `target` 框中心选择最近的检测目标；`selected_tool` 此时被忽略。
-- `use_yolo: false`：本次请求不执行YOLO推理。算法以请求 `target` 矩形的几何中心像素发出相机射线，与安装平面求交得到三维中心；每次只使用 `selected_tool` 指定的工件。
-- `selected_tool` 填写的是 `tools:` 下的键（例如 `redkonb`），不是 `tool_id`。关闭YOLO时该项必须存在且 `enabled: true`。
-- 两项和工具偏移一起热加载，修改保存后下一次解算生效，无需重启。初始即为框中心模式时不会预加载YOLO；以后热切换为YOLO时会在第一次YOLO请求中按需加载。
+- `use_yolo: true`：保持原有流程。YOLO先检测并分类，再用请求 `target` 框中心选择最近的检测目标；请求 `code` 可以省略。
+- `use_yolo: false`：本次请求不执行YOLO推理。算法以请求 `target` 矩形的几何中心像素发出相机射线，与安装平面求交得到三维中心；随后根据请求 `code` 查找具有相同 `tools.<工件>.code` 的工件。
+- 工件 `code` 必须是非空字符串并全局唯一；对应工件必须 `enabled: true`。缺少code返回400，未知或禁用的code返回422。
+- 模式、code映射和工具偏移一起热加载，修改保存后下一次解算生效，无需重启。初始即为框中心模式时不会预加载YOLO；以后热切换为YOLO时会在第一次YOLO请求中按需加载。
+- v3.3配置中的 `target_selection.selected_tool` 可以暂时保留以方便文件升级，但v3.4无YOLO流程会忽略它。
 
-框中心模式可以使用YOLO模型中不存在的新工件，只需先在 `tools:` 下新增并标定该工件。若 `pose.alignment_mode: camera_center`，仍只输出标准光心TCP；若要叠加指定工件的 `standard_to_tool`，应设置为 `pose.alignment_mode: tool`。
+框中心模式可以使用YOLO模型中不存在的新工件，只需先在 `tools:` 下新增、标定并分配唯一 `code`。若 `pose.alignment_mode: camera_center`，仍只输出标准光心TCP；若要叠加指定工件的 `standard_to_tool`，应设置为 `pose.alignment_mode: tool`。
 
 ## Ubuntu SDK环境
 

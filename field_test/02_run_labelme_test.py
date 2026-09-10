@@ -9,8 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
-from common import (create_http_client, create_jaka,
-                    jaka_deg_to_unified, jaka_rad_to_unified, load_test_case,
+from common import (base_x_approach_pose_mm_rpy_deg, create_http_client,
+                    create_jaka, jaka_deg_to_unified, load_test_case,
                     read_jaka_pose_mm_rpy_deg, read_labelme_corners,
                     resolve_from)
 
@@ -27,6 +27,14 @@ def main() -> int:
     parser.add_argument(
         "--base-label", type=int, default=0,
         help="基座面板标签：用标注中该标签的矩形作为base（面板解算）")
+    parser.add_argument(
+        "--code", default=None,
+        help=("无YOLO模式的工件编码；覆盖test_case.yaml中的case.code，"
+              "例如9-8-1"))
+    parser.add_argument(
+        "--approach-x-mm", type=float, default=None,
+        help=("覆盖jaka_test.approach_offset_base_x_mm；预备位X="
+              "最终X+该值，负值表示随后沿基座+X进入"))
     args = parser.parse_args()
     case_path, data = load_test_case(args.case)
     case = dict(data.get("case") or {})
@@ -42,6 +50,9 @@ def main() -> int:
         labelme_path,
         str(case.get("labelme_target_label", "request_target")),
         int(case.get("labelme_shape_index", 0)))
+    raw_workpiece_code = (
+        args.code if args.code is not None else case.get("code"))
+    workpiece_code = str(raw_workpiece_code or "").strip()
     # 基座面板矩形（可选）：从标注中 base-label 读，传给服务端做面板解算。
     base_rect = None
     if args.base_label:
@@ -54,6 +65,12 @@ def main() -> int:
 
     start_jaka = bool(jaka.get("start_jaka", False))
     work_jaka = bool(jaka.get("work_jaka", False))
+    approach_offset_x_mm = float(
+        args.approach_x_mm
+        if args.approach_x_mm is not None
+        else jaka.get("approach_offset_base_x_mm", -200.0))
+    if not np.isfinite(approach_offset_x_mm):
+        raise ValueError("approach_offset_base_x_mm必须是有限数字")
     robot = None
     try:
         if start_jaka or work_jaka:
@@ -73,9 +90,12 @@ def main() -> int:
         capture_tcp_rad[3:] = np.radians(capture_tcp_rad[3:])
         x1, y1 = np.min(corners, axis=0)
         x2, y2 = np.max(corners, axis=0)
+        if workpiece_code:
+            print(f"本次请求工件code={workpiece_code}")
         result = create_http_client(data).get_tcp_pose(
             capture_tcp_rad.tolist(), x1, y1, x2, y2,
-            base=base_rect, live=bool(args.live))
+            base=base_rect, live=bool(args.live),
+            code=(workpiece_code or None))
 
         output_dir = case_path.parent / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -100,14 +120,41 @@ def main() -> int:
               % tuple(pos_deg))
         print("====================================================")
 
+        approach_tcp_deg = base_x_approach_pose_mm_rpy_deg(
+            pos_deg, approach_offset_x_mm)
+        enter_direction = "+X" if approach_offset_x_mm < 0.0 else "-X"
+        if abs(approach_offset_x_mm) < 1e-9:
+            enter_direction = "X不移动"
+        print("\n==== 基座X预备TCP（姿态与最终工作位相同） ====")
+        print("  [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f]"
+              % tuple(approach_tcp_deg))
+        print("  X偏移=%+.1f mm，进入方向=%s"
+              % (approach_offset_x_mm, enter_direction))
+        print("================================================")
+
         if work_jaka:
-            print("work_jaka=true：正在移动到解算工作TCP……")
+            print(
+                "work_jaka=true：先移动到基座X预备位 "
+                f"(X偏移={approach_offset_x_mm:+.1f}mm)，并摆好最终姿态……")
             robot.move_linear(
-                jaka_rad_to_unified(result["pos"]),
+                jaka_deg_to_unified(approach_tcp_deg),
+                name="field_test_work_approach_pose")
+            print("正在仅沿JAKA基座X方向直线进入工作TCP……")
+            robot.move_linear(
+                jaka_deg_to_unified(pos_deg),
                 name="field_test_work_pose")
             print("机器人已到达工作TCP")
+            print("正在沿原路仅沿基座X退回预备位……")
+            robot.move_linear(
+                jaka_deg_to_unified(approach_tcp_deg),
+                name="field_test_work_retreat_pose")
+            print("正在从预备位返回拍照TCP……")
+            robot.move_linear(
+                jaka_deg_to_unified(capture_tcp),
+                name="field_test_return_capture_pose")
+            print("机器人已按原路返回拍照TCP")
         else:
-            print("work_jaka=false：只输出TCP，未执行工作位运动")
+            print("work_jaka=false：只输出目标及预备TCP，未执行工作位运动")
     finally:
         if robot is not None:
             robot.disconnect()

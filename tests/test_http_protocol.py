@@ -36,6 +36,7 @@ class HttpProtocolTests(unittest.TestCase):
         result = protocol.get_tcp_pose({
             "pos": [10, 20, 30, np.pi / 2, -np.pi / 4, np.pi],
             "x1": 100, "y1": 200, "x2": 300, "y2": 400,
+            "code": "9-8-1",
         })
         internal = solver.requests[0][0]
         self.assertTrue(np.allclose(
@@ -44,6 +45,7 @@ class HttpProtocolTests(unittest.TestCase):
         self.assertEqual(internal["targetCornersPx"], [
             [100, 200], [300, 200], [300, 400], [100, 400]])
         self.assertTrue(internal["useCachedHttpSnapshot"])
+        self.assertEqual(internal["workpieceCode"], "9-8-1")
         self.assertEqual(set(result), {"code", "pos"})
         self.assertTrue(np.allclose(
             result["pos"], [1, 2, 3, np.pi / 2, -np.pi / 4, np.pi]))
@@ -52,6 +54,15 @@ class HttpProtocolTests(unittest.TestCase):
         result = VisionHttpProtocol(_RecordingSolver()).snapshot()
         self.assertEqual(result, {
             "code": 200, "path": "/tmp/20260828120000.jpg"})
+
+    def test_empty_workpiece_code_is_rejected(self):
+        result = VisionHttpProtocol(_RecordingSolver()).get_tcp_pose({
+            "pos": [10, 20, 30, 0, 0, 0],
+            "target": {"x1": 100, "y1": 200, "x2": 300, "y2": 400},
+            "code": "   ",
+        })
+        self.assertEqual(result["code"], 400)
+        self.assertIn("code", result["status"])
 
 
 if __name__ == "__main__":

@@ -118,17 +118,18 @@ class VisionToolTcpSolver:
                          time.perf_counter() - step_started)
             else:
                 log.info(
-                    "框中心模式已启用: 跳过YOLO启动预加载，指定工件=%s",
-                    tool_offsets.selected_tool)
+                    "框中心模式已启用: 跳过YOLO启动预加载，"
+                    "由请求code动态选择工件，可用映射=%s",
+                    tool_offsets.code_to_tool)
             step_started = time.perf_counter()
             self.pose_solver = TargetPoseSolver(
                 self.calibration, self.config.pose, tool_offsets.tools)
             log.info(
                 "工具偏移配置加载: %s 类别=%d use_yolo=%s "
-                "selected_tool=%s sha256=%s",
+                "code映射数=%d sha256=%s",
                 tool_offsets.source_path, len(tool_offsets.tools),
                 tool_offsets.use_yolo,
-                tool_offsets.selected_tool or "-",
+                len(tool_offsets.code_to_tool),
                 tool_offsets.sha256[:12])
             cam_cfg = self.config.camera
             log.info("相机连接: type=%s ip=%s",
@@ -238,11 +239,43 @@ class VisionToolTcpSolver:
         base_rect = (
             None if request.base_corners_px is None
             else np.asarray(request.base_corners_px).reshape(-1).tolist())
-        log.info("解算请求: taskId=%s 拍照位=%s target=%s base=%s",
+        log.info("解算请求: taskId=%s code=%s 拍照位=%s target=%s base=%s",
                  request.task_id,
+                 request.workpiece_code or "-",
                  np.round(request.capture_tcp_mm_rpy_deg, 3).tolist(),
                  np.asarray(request.target_corners_px).reshape(-1).tolist(),
                  base_rect)
+        try:
+            # 目标模式、code映射和工具偏移均在每次解算开始时热加载。
+            # 先完成code校验，再采集大图/点云，错误请求不会浪费一次拍照。
+            tool_offsets = load_tool_offsets(self.tool_offsets_path)
+        except (OSError, TypeError, ValueError) as exc:
+            log.error("工具偏移配置热加载失败: %s", exc, exc_info=True)
+            raise TaskError(
+                "TOOL_CONFIG_RELOAD_FAILED",
+                f"工具偏移配置读取或校验失败: {exc}") from exc
+
+        selected_tool = None
+        if not tool_offsets.use_yolo:
+            if request.workpiece_code is None:
+                raise TaskError(
+                    "INVALID_REQUEST",
+                    "关闭YOLO时/get_tcp_pose请求必须提供非空code")
+            selected_tool = tool_offsets.code_to_tool.get(
+                request.workpiece_code)
+            if selected_tool is None:
+                available = (
+                    ", ".join(sorted(tool_offsets.code_to_tool)) or "无")
+                raise TaskError(
+                    "TOOL_CODE_UNKNOWN",
+                    f"code {request.workpiece_code!r}未配置对应工件；"
+                    f"可用code: {available}")
+            if not bool(tool_offsets.tools[selected_tool].get(
+                    "enabled", True)):
+                raise TaskError(
+                    "TOOL_DISABLED",
+                    f"code {request.workpiece_code!r}对应工件"
+                    f"{selected_tool!r}已禁用")
         use_cached_snapshot = bool(
             payload.get("useCachedHttpSnapshot", False))
         live_capture_delay_s = 0.0
@@ -281,16 +314,6 @@ class VisionToolTcpSolver:
                 request.base_corners_px,
                 source_width, source_height,
                 camera_model.width, camera_model.height)
-        try:
-            # v3.3热加载边界：目标选择模式、固定工件和工具偏移在每次
-            # 解算时读取；相机、模型、手眼矩阵和全局修正不重新初始化。
-            tool_offsets = load_tool_offsets(self.tool_offsets_path)
-        except (OSError, TypeError, ValueError) as exc:
-            log.error("工具偏移配置热加载失败: %s", exc, exc_info=True)
-            raise TaskError(
-                "TOOL_CONFIG_RELOAD_FAILED",
-                f"工具偏移配置读取或校验失败: {exc}") from exc
-
         step = time.perf_counter()
         if tool_offsets.use_yolo:
             selection_mode = "yolo"
@@ -319,7 +342,7 @@ class VisionToolTcpSolver:
             batch = self.detector.process_box_center(
                 frame, camera_model, request.task_id,
                 target_region_px=corners,
-                selected_tool=tool_offsets.selected_tool,
+                tool_class_name=selected_tool,
                 panel_region_px=panel_region_px)
             observation = batch.observations[0]
             request_center = np.mean(corners, axis=0)
@@ -332,9 +355,11 @@ class VisionToolTcpSolver:
                 ordered_corners_px=corners,
             )
             log.info(
-                "检测: 模式=框中心 指定工件=%s 中心=%s 有效解算=%d "
+                "检测: 模式=框中心 code=%s 对应工件=%s 中心=%s "
+                "有效解算=%d "
                 "耗时=%.1fms（未执行YOLO推理）",
-                tool_offsets.selected_tool,
+                request.workpiece_code,
+                selected_tool,
                 np.round(request_center, 2).tolist(),
                 len(batch.valid_observations()),
                 (time.perf_counter() - step) * 1000.0)
@@ -380,10 +405,11 @@ class VisionToolTcpSolver:
                   if plane_dist is not None else float("nan")),
                  (float(ray_dist) * 1000.0
                   if ray_dist is not None else float("nan")))
-        log.info("v3.3求解: 目标模式=%s 类别=%s 工具=%s "
+        log.info("v3.4求解: 目标模式=%s code=%s 类别=%s 工具=%s "
                  "光心参考距离=%.1fmm "
                  "工具偏移xyz=%s rpy=%s 配置sha256=%s 标准TCP=%s 最终TCP=%s",
                  selection_mode,
+                 request.workpiece_code or "-",
                  observation.class_name,
                  pose["toolId"],
                  float(pose["standoffMm"]),
@@ -406,8 +432,9 @@ class VisionToolTcpSolver:
             "targetSelection": {
                 "mode": selection_mode,
                 "useYolo": tool_offsets.use_yolo,
+                "requestedCode": request.workpiece_code,
                 "configuredTool": (
-                    tool_offsets.selected_tool
+                    selected_tool
                     if not tool_offsets.use_yolo else None),
                 "centerSource": (
                     "yolo_detection_center"
@@ -417,7 +444,11 @@ class VisionToolTcpSolver:
                 "sourcePath": str(tool_offsets.source_path),
                 "sha256": tool_offsets.sha256,
                 "modifiedAtUnixS": tool_offsets.modified_at_unix_s,
+                "requestedCode": request.workpiece_code,
                 "selectedClass": observation.class_name,
+                "configuredCode": (
+                    tool_offsets.tools[observation.class_name].get("code")
+                    if not tool_offsets.use_yolo else None),
                 "standardToTool": {
                     "xyzMm": pose["standardToToolXyzMm"],
                     "rpyDeg": pose["standardToToolRpyDeg"],

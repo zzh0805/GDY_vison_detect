@@ -148,17 +148,16 @@ class SimulatedWorkflowTests(unittest.TestCase):
         self.temp.cleanup()
 
     def write_tool_offsets(self, x_offset_mm: float = 100.0,
-                           use_yolo: bool = True,
-                           selected_tool: str = "panel") -> None:
+                           use_yolo: bool = True) -> None:
         self.tool_offsets_path.write_text(
             yaml.safe_dump({
                 "version": 1,
                 "target_selection": {
                     "use_yolo": use_yolo,
-                    "selected_tool": selected_tool,
                 },
                 "tools": {
                     "panel": {
+                        "code": "9-8-1",
                         "tool_id": "tool-panel",
                         "enabled": True,
                         "standard_to_tool": {
@@ -173,10 +172,8 @@ class SimulatedWorkflowTests(unittest.TestCase):
     def write_config(self, alignment_mode: str,
                      live_capture_delay_s: float = 0.0,
                      snapshot_delay_s: float = 0.0,
-                     use_yolo: bool = True,
-                     selected_tool: str = "panel") -> None:
-        self.write_tool_offsets(
-            use_yolo=use_yolo, selected_tool=selected_tool)
+                     use_yolo: bool = True) -> None:
+        self.write_tool_offsets(use_yolo=use_yolo)
         data = {
             "system": {
                 "initialization_timeout_s": 5,
@@ -249,11 +246,10 @@ class SimulatedWorkflowTests(unittest.TestCase):
     def http_service(self, alignment_mode="camera_center",
                      live_capture_delay_s=0.0,
                      snapshot_delay_s=0.0,
-                     use_yolo=True,
-                     selected_tool="panel"):
+                     use_yolo=True):
         self.write_config(
             alignment_mode, live_capture_delay_s, snapshot_delay_s,
-            use_yolo, selected_tool)
+            use_yolo)
         camera = FakeCamera()
         model = FakeModel()
         camera.yolo_model = model
@@ -367,10 +363,11 @@ class SimulatedWorkflowTests(unittest.TestCase):
         # 请求框中心为(80,50)，相机内参对应平面交点(300,0,1000)mm；
         # 50mm悬停后再叠加panel工具局部X+100mm。
         with self.http_service(
-                "tool", use_yolo=False, selected_tool="panel"
+                "tool", use_yolo=False
         ) as (client, camera):
             solved = client.get_tcp_pose(
-                [0, 0, 0, 0, 0, 0], 75, 45, 85, 55, live=True)
+                [0, 0, 0, 0, 0, 0], 75, 45, 85, 55,
+                live=True, code="9-8-1")
 
         self.assertEqual(set(solved), {"code", "pos"})
         self.assertEqual(solved["code"], 200, solved)
@@ -383,10 +380,10 @@ class SimulatedWorkflowTests(unittest.TestCase):
             first = client.get_tcp_pose(
                 [0, 0, 0, 0, 0, 0], 40, 40, 60, 60, live=True)
             self.write_tool_offsets(
-                x_offset_mm=100.0, use_yolo=False,
-                selected_tool="panel")
+                x_offset_mm=100.0, use_yolo=False)
             second = client.get_tcp_pose(
-                [0, 0, 0, 0, 0, 0], 75, 45, 85, 55, live=True)
+                [0, 0, 0, 0, 0, 0], 75, 45, 85, 55,
+                live=True, code="9-8-1")
 
         self.assertEqual(first["code"], 200, first)
         self.assertEqual(second["code"], 200, second)
@@ -394,9 +391,81 @@ class SimulatedWorkflowTests(unittest.TestCase):
             second["pos"], [400, 0, 950, 0, 0, 0], atol=1e-5))
         self.assertEqual(camera.yolo_model.predict_calls, 1)
 
-    def test_box_center_mode_requires_existing_enabled_tool(self):
-        self.write_tool_offsets(use_yolo=False, selected_tool="missing")
-        with self.assertRaisesRegex(ValueError, "未在tools中定义"):
+    def test_box_center_mode_requires_at_least_one_tool_code(self):
+        self.write_tool_offsets(use_yolo=False)
+        data = yaml.safe_load(
+            self.tool_offsets_path.read_text(encoding="utf-8"))
+        data["tools"]["panel"].pop("code")
+        self.tool_offsets_path.write_text(
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+            encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "至少一个.*code"):
+            load_tool_offsets(self.tool_offsets_path)
+
+    def test_box_center_mode_selects_tool_from_request_code(self):
+        self.write_tool_offsets(use_yolo=False)
+        data = yaml.safe_load(
+            self.tool_offsets_path.read_text(encoding="utf-8"))
+        data["tools"]["other"] = {
+            "code": "9-8-2",
+            "tool_id": "tool-other",
+            "enabled": True,
+            "standard_to_tool": {
+                "xyz_mm": [250.0, 0.0, 0.0],
+                "rpy_deg": [0.0, 0.0, 0.0],
+            },
+        }
+        self.tool_offsets_path.write_text(
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+            encoding="utf-8")
+        with self.http_service(
+                "tool", use_yolo=False
+        ) as (client, camera):
+            # http_service会重写配置，因此在服务启动后热加载第二个工具。
+            self.tool_offsets_path.write_text(
+                yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                encoding="utf-8")
+            solved = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 75, 45, 85, 55,
+                live=True, code="9-8-2")
+
+        self.assertEqual(solved["code"], 200, solved)
+        self.assertTrue(np.allclose(
+            solved["pos"], [550, 0, 950, 0, 0, 0], atol=1e-5))
+        self.assertEqual(camera.yolo_model.predict_calls, 0)
+
+    def test_box_center_mode_rejects_unknown_request_code(self):
+        with self.http_service(
+                "tool", use_yolo=False
+        ) as (client, camera):
+            solved = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 75, 45, 85, 55,
+                live=True, code="missing")
+
+        self.assertEqual(solved["code"], 422, solved)
+        self.assertIn("未配置对应工件", solved["status"])
+        self.assertEqual(camera.frame_id, 0)
+
+    def test_box_center_mode_requires_request_code(self):
+        with self.http_service(
+                "tool", use_yolo=False
+        ) as (client, camera):
+            solved = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 75, 45, 85, 55, live=True)
+
+        self.assertEqual(solved["code"], 400, solved)
+        self.assertIn("必须提供", solved["status"])
+        self.assertEqual(camera.frame_id, 0)
+
+    def test_duplicate_tool_codes_are_rejected(self):
+        self.write_tool_offsets()
+        data = yaml.safe_load(
+            self.tool_offsets_path.read_text(encoding="utf-8"))
+        data["tools"]["other"] = dict(data["tools"]["panel"])
+        self.tool_offsets_path.write_text(
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+            encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "code必须唯一"):
             load_tool_offsets(self.tool_offsets_path)
 
     def test_v32_tool_file_without_target_selection_defaults_to_yolo(self):
@@ -408,7 +477,6 @@ class SimulatedWorkflowTests(unittest.TestCase):
             encoding="utf-8")
         snapshot = load_tool_offsets(self.tool_offsets_path)
         self.assertTrue(snapshot.use_yolo)
-        self.assertEqual(snapshot.selected_tool, "")
 
     def test_tool_offset_file_is_reloaded_without_restarting_service(self):
         with self.http_service("tool") as (client, camera):

@@ -68,7 +68,29 @@ def _validate_tools(value: Any) -> Dict[str, Any]:
             if not math.isfinite(standoff_mm) or standoff_mm < 0.0:
                 raise ValueError(
                     f"tools.{class_name}.standoff_mm必须是非负有限数字")
+        if "code" in tool:
+            if not isinstance(tool["code"], str):
+                raise ValueError(f"tools.{class_name}.code必须是字符串")
+            if not tool["code"].strip():
+                raise ValueError(f"tools.{class_name}.code不能为空")
     return tools
+
+
+def _build_code_to_tool(tools: Mapping[str, Any]) -> Dict[str, str]:
+    """建立无YOLO模式使用的外部code到工具类别映射。"""
+    result: Dict[str, str] = {}
+    for class_name, raw_tool in tools.items():
+        tool = _mapping(raw_tool, f"tools.{class_name}")
+        if "code" not in tool:
+            continue
+        code = str(tool["code"]).strip()
+        previous = result.get(code)
+        if previous is not None:
+            raise ValueError(
+                f"tools中的code必须唯一: {code!r}同时用于"
+                f"{previous!r}和{class_name!r}")
+        result[code] = class_name
+    return result
 
 
 @dataclass(frozen=True)
@@ -78,7 +100,7 @@ class ToolOffsetsSnapshot:
     source_path: Path
     tools: Dict[str, Any]
     use_yolo: bool
-    selected_tool: str
+    code_to_tool: Dict[str, str]
     sha256: str
     modified_at_unix_s: float
 
@@ -113,30 +135,22 @@ def load_tool_offsets(path: Any) -> ToolOffsetsSnapshot:
     if int(version) != 1:
         raise ValueError(f"工具偏移配置version只支持1，实际为{version!r}")
     tools = _validate_tools(data.get("tools"))
+    code_to_tool = _build_code_to_tool(tools)
     target_selection = _mapping(
         data.get("target_selection"), "target_selection")
     use_yolo = target_selection.get("use_yolo", True)
     if not isinstance(use_yolo, bool):
         raise ValueError("target_selection.use_yolo必须是true或false")
-    selected_tool = str(
-        target_selection.get("selected_tool") or "").strip()
-    if not use_yolo:
-        if not selected_tool:
-            raise ValueError(
-                "关闭YOLO时必须设置target_selection.selected_tool")
-        if selected_tool not in tools:
-            raise ValueError(
-                "target_selection.selected_tool未在tools中定义: "
-                f"{selected_tool!r}")
-        if not bool(tools[selected_tool].get("enabled", True)):
-            raise ValueError(
-                "target_selection.selected_tool对应工具未启用: "
-                f"{selected_tool!r}")
+    if not use_yolo and not any(
+            bool(tools[class_name].get("enabled", True))
+            for class_name in code_to_tool.values()):
+        raise ValueError(
+            "关闭YOLO时至少一个已启用的tools工件必须配置唯一code")
     return ToolOffsetsSnapshot(
         source_path=source,
         tools=tools,
         use_yolo=use_yolo,
-        selected_tool=selected_tool,
+        code_to_tool=code_to_tool,
         sha256=hashlib.sha256(payload).hexdigest(),
         modified_at_unix_s=float(after.st_mtime),
     )

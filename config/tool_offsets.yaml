@@ -5,17 +5,17 @@
 # xyz_mm是标准TCP局部坐标系中的毫米位移，rpy_deg为JAKA RPY角度。
 version: 1
 
-# v3.3目标选择（每次解算热加载，修改后不需要重启服务）：
+# v3.4目标选择（每次解算热加载，修改后不需要重启服务）：
 # use_yolo: true  -> 保持原流程，用YOLO检测中心匹配请求框。
 # use_yolo: false -> 完全跳过YOLO，以请求target框的几何中心作为目标中心；
-#                    每次都使用selected_tool指定的工件/工具偏移。
-# selected_tool必须与下方tools中的键完全一致，且该项enabled必须为true。
+#                    根据/get_tcp_pose请求中的code动态选择工件/工具偏移。
+# 每个可供无YOLO模式选择的工件都要配置唯一code。
 target_selection:
   use_yolo: true
-  selected_tool: redkonb
 
 tools:
   greenbtn:
+    code: "9-8-1"
     tool_id: tool_green_button
     enabled: true
     # 由v1现场示教结果数学迁移；详见 migration/TOOL_OFFSET_MIGRATION.md。
@@ -24,6 +24,7 @@ tools:
       rpy_deg: [-3.005278, -4.276208, -0.141311]
 
   redbtn:
+    code: "9-8-2"
     tool_id: tool_red_button
     enabled: true
     # 与greenbtn同一物理工具，共用迁移后的偏移。
@@ -32,6 +33,8 @@ tools:
       rpy_deg: [-3.005278, -4.276208, -0.141311]
 
   run:
+    # 示例映射，请按现场实际名称确认后修改。
+    code: "9-7-2"
     tool_id: tool_run
     enabled: true
     standard_to_tool:
@@ -39,6 +42,8 @@ tools:
       rpy_deg: [0.0, 0.0, 0.0]
 
   konb1:
+    # 示例映射，请按现场实际名称确认后修改。
+    code: "9-7-3"
     tool_id: tool_knob_1
     enabled: true
     standard_to_tool:
@@ -46,8 +51,19 @@ tools:
       rpy_deg: [-0.0006, -0.0020, 0.0004]
 
   redkonb:
+    # 示例映射，请按现场实际名称确认后修改。
+    code: "9-8-4"
     tool_id: tool_red_knob
     enabled: true
     standard_to_tool:
       xyz_mm: [152.3221, -9.8886, -21.3184]
       rpy_deg: [0.6305, -0.0013, 0.0012]
+
+  # 红色急停开关9-8-3尚无已确认的工件名称和偏移，确认后按此格式增加：
+  # emergency_stop:
+  #   code: "9-8-3"
+  #   tool_id: tool_emergency_stop
+  #   enabled: true
+  #   standard_to_tool:
+  #     xyz_mm: [待标定, 待标定, 待标定]
+  #     rpy_deg: [待标定, 待标定, 待标定]

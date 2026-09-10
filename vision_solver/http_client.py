@@ -38,12 +38,14 @@ class VisionHttpClient:
 
     def get_tcp_pose(self, pos_mm_rpy_rad: Sequence[float],
                      x1: float, y1: float, x2: float, y2: float,
-                     *, base: Any = None, live: bool = False) -> dict:
+                     *, base: Any = None, live: bool = False,
+                     code: str | None = None) -> dict:
         """解算目标TCP。
         - target 矩形由 x1,y1,x2,y2 给出；
         - base：基座面板矩形 dict {"x1","y1","x2","y2"}（可选）。
           提供时目标中心深度以 base 面板平面为准（每次检测以基座深度为准）；
         - live=True时实时采集当前帧（拍照+检测+解算一体）。
+        - code：关闭YOLO时用于选择tools工件的外部业务编码。
         """
         payload = {
             "pos": list(pos_mm_rpy_rad),
@@ -59,4 +61,6 @@ class VisionHttpClient:
             }
         if live:
             payload["live"] = True
+        if code is not None:
+            payload["code"] = str(code)
         return self._post("/get_tcp_pose", payload)

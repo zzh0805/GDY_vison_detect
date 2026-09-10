@@ -12,6 +12,14 @@
 
 ## 当前版本
 
+`v3.4.0`（2026-09-10）更新内容：
+
+- 无YOLO模式由请求新增的 `code` 动态选择工件，不再锁定 `selected_tool`；
+- 每个工件可在 `config/tool_offsets.yaml` 的自身配置下增加唯一 `code`；
+- `code`、模式和工具偏移都在每次解算时热加载，切换工件无需重启服务；
+- `run_field_test.sh`/`.ps1` 支持 `--code 9-8-1`，也可在 `field_test/test_case.yaml` 设置 `case.code`；
+- 现场运动支持可调的基座X预备距离：预备位摆好姿态，仅沿基座X进入，完成后按相同预备位返回。
+
 `v3.3.0`（2026-09-08）更新内容：
 
 - 在 `config/tool_offsets.yaml` 新增热加载的 `target_selection.use_yolo` 与 `target_selection.selected_tool`；
@@ -76,7 +84,8 @@
 拍照TCP × T_tcp_camera → 拍照相机位姿
 光心参考位姿 × inverse(T_tcp_camera) → 逆手眼活动TCP
 逆手眼活动TCP + pose.tcp_correction → 标准活动TCP
-每次读取tool_offsets.yaml中的目标模式及tools.<选定工件>.standard_to_tool
+每次读取tool_offsets.yaml中的目标模式；无YOLO时按请求code映射工件
+读取tools.<选定工件>.standard_to_tool
 标准活动TCP × standard_to_tool → 最终工作TCP
 ```
 
@@ -86,15 +95,35 @@
 
 服务启动后可直接修改 [config/tool_offsets.yaml](config/tool_offsets.yaml)。下一次 `/get_tcp_pose` 会在目标选择和位姿计算前重新读取并校验整个文件。相机连接、手眼矩阵和 `pose.tcp_correction` 不会重新初始化；若从框中心模式热切换回YOLO，模型会在首次YOLO请求时按需准备。
 
-目标选择的两个开关如下：
+无YOLO动态工件选择示例：
 
 ```yaml
 target_selection:
   use_yolo: false
-  selected_tool: redkonb
+
+tools:
+  greenbtn:
+    code: "9-8-1"
+    tool_id: tool_green_button
+    enabled: true
+    standard_to_tool:
+      xyz_mm: [109.525640, 52.685308, -16.277166]
+      rpy_deg: [-3.005278, -4.276208, -0.141311]
 ```
 
-`use_yolo: true` 保持原有“YOLO中心与请求框匹配”流程，此时 `selected_tool` 不参与选择。`use_yolo: false` 时不调用YOLO，直接使用请求 `target` 框的中心像素，并把 `selected_tool` 作为本次唯一工件。该名称必须是同一文件 `tools:` 下已启用的键；要使用对应工具偏移，还应保持 `workflow.yaml` 的 `pose.alignment_mode: tool`。
+`use_yolo: true` 保持原有“YOLO中心与请求框匹配”流程，请求 `code` 可以省略。`use_yolo: false` 时不调用YOLO，直接使用请求 `target` 框的中心像素，并用请求中的 `code` 查找具有相同 `tools.<工件>.code` 的已启用工件。每个 `code` 必须是非空字符串且在整个文件中唯一；要叠加对应工具偏移，还应保持 `workflow.yaml` 的 `pose.alignment_mode: tool`。v3.3 的 `selected_tool` 字段允许继续留在文件中，但v3.4无YOLO模式不再使用它。
+
+请求示例：
+
+```json
+{
+  "pos": [379.5, -432.0, 509.3, 1.539, -0.836, 1.536],
+  "base": {"x1": 100, "y1": 100, "x2": 900, "y2": 900},
+  "target": {"x1": 852, "y1": 548, "x2": 982, "y2": 679},
+  "live": true,
+  "code": "9-8-1"
+}
+```
 
 如果文件存在YAML语法错误、缺少类别、数组不是3个有限数字或仍使用v1字段 `camera_to_tool`，本次请求会失败并且不会沿用旧偏移。修正文件后直接重试即可，不需要重启服务。`service.log` 和保存的 `result.json` 会记录本次实际使用的数值及文件SHA-256。
 

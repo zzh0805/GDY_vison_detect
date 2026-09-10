@@ -79,6 +79,24 @@ def jaka_rad_to_unified(pose_mm_rpy_rad: Any) -> np.ndarray:
         np.asarray(pose_mm_rpy_rad, dtype=np.float64).reshape(6))
 
 
+def base_x_approach_pose_mm_rpy_deg(
+        target_pose_mm_rpy_deg: Any,
+        approach_offset_base_x_mm: float) -> np.ndarray:
+    """生成只与最终工作位相差基座X的预备位。
+
+    偏移为负表示预备位在最终位的基座-X侧，随后沿基座+X进入；
+    偏移为正则方向相反。姿态及Y/Z始终与最终工作位完全一致。
+    """
+    target = np.asarray(
+        target_pose_mm_rpy_deg, dtype=np.float64).reshape(6)
+    offset = float(approach_offset_base_x_mm)
+    if not np.isfinite(target).all() or not np.isfinite(offset):
+        raise ValueError("工作TCP和基座X预备位偏移必须是有限数字")
+    approach = target.copy()
+    approach[0] += offset
+    return approach
+
+
 def read_labelme_corners(path: Path, label: str,
                          shape_index: int = 0) -> np.ndarray:
     # 兼容 Windows 工具保存的 UTF-16/UTF-8 BOM 标注文件：

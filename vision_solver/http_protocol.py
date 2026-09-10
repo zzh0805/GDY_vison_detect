@@ -21,6 +21,8 @@ ERROR_CODE_MAP = {
     "TARGET_GEOMETRY_FAILED": 422,
     "PLANE_RMS_TOO_HIGH": 422,
     "TOOL_MAPPING_MISSING": 422,
+    "TOOL_CODE_UNKNOWN": 422,
+    "TOOL_DISABLED": 422,
     "TOOL_CONFIG_RELOAD_FAILED": 500,
     "CAMERA_3D_MISSING": 500,
     "CAMERA_COLOR_MISSING": 500,
@@ -112,6 +114,12 @@ class VisionHttpProtocol:
             if payload.get("base") is not None:
                 base_corners = self._parse_rect(
                     payload["base"], "base", width, height)
+            workpiece_code = None
+            raw_code = payload.get("code")
+            if raw_code is not None:
+                if not isinstance(raw_code, str) or not raw_code.strip():
+                    raise ValueError("code必须是非空字符串")
+                workpiece_code = raw_code.strip()
         except (TypeError, ValueError) as exc:
             return {"code": 400, "status": str(exc)}
 
@@ -128,6 +136,8 @@ class VisionHttpProtocol:
             "targetCornersPx": target_corners,
             "useCachedHttpSnapshot": not use_live,
         }
+        if workpiece_code is not None:
+            task["workpieceCode"] = workpiece_code
         if base_corners is not None:
             task["baseCornersPx"] = base_corners
         result = self.solver.handle_task(task, timeout_s=self.timeout_s)
