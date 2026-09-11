@@ -2,8 +2,9 @@
 """Ultralytics YOLO 二维检测及基于有组织点云的三维中心/法向恢复。"""
 from __future__ import annotations
 
+import math
 import time
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -41,6 +42,8 @@ class YoloTargetDetector:
     detector_version = "1.1.0"
     box_center_detector_name = "request_box_center_pointcloud"
     box_center_detector_version = "1.0.0"
+    circle_center_detector_name = "nearest_circle_center_pointcloud"
+    circle_center_detector_version = "1.0.0"
 
     def __init__(
             self,
@@ -677,8 +680,11 @@ class YoloTargetDetector:
             request_id: str, target_region_px: np.ndarray,
             tool_class_name: str,
             panel_region_px: Optional[np.ndarray] = None,
+            refined_center_px: Optional[np.ndarray] = None,
+            refined_radius_px: Optional[float] = None,
+            refinement_metrics: Optional[Mapping[str, Any]] = None,
     ) -> TargetDetectionBatch:
-        """跳过YOLO，以请求框中心像素恢复唯一目标的三维几何。
+        """跳过YOLO，以请求框中心或拟合圆心恢复唯一目标三维几何。
 
         ``tool_class_name`` 是本次请求code动态映射出的工具类别，同时
         作为该唯一观测的类别名，使后续位姿链可以
@@ -712,7 +718,7 @@ class YoloTargetDetector:
 
         tool_name = str(tool_class_name or "").strip()
         if not tool_name:
-            raise ValueError("框中心模式缺少指定工件")
+            raise ValueError("无YOLO模式缺少指定工件")
         corners = np.asarray(target_region_px, dtype=np.float64).reshape(-1, 2)
         if corners.shape != (4, 2) or not np.isfinite(corners).all():
             raise ValueError("目标框必须是4个有限像素角点")
@@ -720,17 +726,52 @@ class YoloTargetDetector:
         x2, y2 = np.max(corners, axis=0)
         if x2 <= x1 or y2 <= y1:
             raise ValueError("目标框为空")
-        center_px = np.array(
+        request_center_px = np.array(
             [(x1 + x2) * 0.5, (y1 + y2) * 0.5], dtype=np.float64)
+        center_px = request_center_px.copy()
+        metrics_extra = dict(refinement_metrics or {})
+        selection_mode = "box_center"
+        detector_name = self.box_center_detector_name
+        detector_version = self.box_center_detector_version
+        confidence = 1.0
+        if refined_center_px is not None:
+            center_px = np.asarray(
+                refined_center_px, dtype=np.float64).reshape(2)
+            if not np.isfinite(center_px).all():
+                raise ValueError("拟合圆心包含NaN/Inf")
+            radius = float(refined_radius_px or 0.0)
+            if not math.isfinite(radius) or radius <= 0.0:
+                raise ValueError("拟合圆半径必须是正有限数字")
+            selection_mode = "nearest_circle_center"
+            detector_name = self.circle_center_detector_name
+            detector_version = self.circle_center_detector_version
+            confidence = float(metrics_extra.get("circle_score", 1.0))
+            confidence = float(np.clip(confidence, 0.0, 1.0))
+            detection_x1 = max(0.0, center_px[0] - radius)
+            detection_y1 = max(0.0, center_px[1] - radius)
+            detection_x2 = min(
+                float(camera_model.width - 1), center_px[0] + radius)
+            detection_y2 = min(
+                float(camera_model.height - 1), center_px[1] + radius)
+            detection_width = detection_x2 - detection_x1
+            detection_height = detection_y2 - detection_y1
+        else:
+            radius = 0.0
+            detection_x1, detection_y1 = float(x1), float(y1)
+            detection_x2, detection_y2 = float(x2), float(y2)
+            detection_width, detection_height = x2 - x1, y2 - y1
         detection = Yolo2DDetection(
             instance_id=f"manual_{frame.frame_id:06d}",
             class_id=-1,
             class_name=tool_name,
-            confidence=1.0,
+            confidence=confidence,
             xywh_px=np.array([
-                center_px[0], center_px[1], x2 - x1, y2 - y1],
+                center_px[0], center_px[1],
+                detection_width, detection_height],
                 dtype=np.float64),
-            xyxy_px=np.array([x1, y1, x2, y2], dtype=np.float64),
+            xyxy_px=np.array([
+                detection_x1, detection_y1,
+                detection_x2, detection_y2], dtype=np.float64),
         )
         overlay = color.copy()
         errors = []
@@ -745,20 +786,24 @@ class YoloTargetDetector:
                 all_detections=(detection,), panel_plane=panel_plane)
             center_source = str(metrics.get("center_depth_source") or "")
             metrics["center_depth_source"] = center_source.replace(
-                "yolo_center", "request_box_center")
+                "yolo_center",
+                ("fitted_circle_center" if refined_center_px is not None
+                 else "request_box_center"))
             metrics.update({
-                "target_selection_mode": "box_center",
+                "target_selection_mode": selection_mode,
                 "request_box_corners_px": corners.tolist(),
-                "request_box_center_px": center_px.tolist(),
+                "request_box_center_px": request_center_px.tolist(),
+                "selected_center_px": center_px.tolist(),
                 "configured_tool": tool_name,
             })
+            metrics.update(metrics_extra)
             observation = TargetObservation(
                 request_id=request_id,
                 frame_id=frame.frame_id,
                 instance_id=detection.instance_id,
                 class_id=-1,
                 class_name=tool_name,
-                confidence=1.0,
+                confidence=confidence,
                 valid=True,
                 center_camera_m=center,
                 surface_normal_camera=normal,
@@ -767,8 +812,8 @@ class YoloTargetDetector:
                 T_camera_target=self._target_transform(center, normal, tangent),
                 bbox_2d=tuple(float(x) for x in detection.xyxy_px),
                 quality_metrics=metrics,
-                detector_name=self.box_center_detector_name,
-                detector_version=self.box_center_detector_version,
+                detector_name=detector_name,
+                detector_version=detector_version,
             )
             color_box = (0, 220, 0)
             self._draw_normal(overlay, center, normal, camera_model)
@@ -780,7 +825,7 @@ class YoloTargetDetector:
                         overlay, (outer[0], outer[1]),
                         (outer[2], outer[3]), (255, 255, 0), 1)
         except Exception as exc:
-            message = f"请求框中心三维恢复失败: {exc}"
+            message = f"无YOLO目标中心三维恢复失败: {exc}"
             errors.append(message)
             observation = TargetObservation(
                 request_id=request_id,
@@ -788,36 +833,50 @@ class YoloTargetDetector:
                 instance_id=detection.instance_id,
                 class_id=-1,
                 class_name=tool_name,
-                confidence=1.0,
+                confidence=confidence,
                 valid=False,
                 bbox_2d=tuple(float(x) for x in detection.xyxy_px),
                 quality_metrics={
-                    "target_selection_mode": "box_center",
+                    "target_selection_mode": selection_mode,
                     "request_box_corners_px": corners.tolist(),
-                    "request_box_center_px": center_px.tolist(),
+                    "request_box_center_px": request_center_px.tolist(),
+                    "selected_center_px": center_px.tolist(),
                     "configured_tool": tool_name,
+                    **metrics_extra,
                 },
-                detector_name=self.box_center_detector_name,
-                detector_version=self.box_center_detector_version,
+                detector_name=detector_name,
+                detector_version=detector_version,
                 error_code="GEOMETRY_RECOVERY_FAILED",
                 error_message=message,
             )
             color_box = (0, 0, 255)
 
         polygon = np.rint(corners).astype(np.int32).reshape(-1, 1, 2)
-        cv2.polylines(overlay, [polygon], True, color_box, 2, cv2.LINE_AA)
+        cv2.polylines(overlay, [polygon], True, (0, 220, 255), 2,
+                      cv2.LINE_AA)
+        request_center_i = tuple(np.rint(request_center_px).astype(int))
         center_i = tuple(np.rint(center_px).astype(int))
-        cv2.circle(overlay, center_i, 5, (0, 255, 255), -1)
+        cv2.circle(overlay, request_center_i, 5, (0, 220, 255), -1)
+        if refined_center_px is not None:
+            cv2.arrowedLine(
+                overlay, request_center_i, center_i, (255, 80, 0), 2,
+                cv2.LINE_AA, tipLength=0.18)
+            cv2.circle(
+                overlay, center_i, int(round(radius)),
+                color_box, 3, cv2.LINE_AA)
+        cv2.circle(overlay, center_i, 5, color_box, -1)
         cv2.putText(
-            overlay, f"box-center:{tool_name}",
+            overlay,
+            (("nearest-circle" if refined_center_px is not None
+              else "box-center") + f":{tool_name}"),
             (int(round(x1)), max(20, int(round(y1)) - 6)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.55, color_box, 2, cv2.LINE_AA)
         return TargetDetectionBatch(
             request_id=request_id,
             frame_id=frame.frame_id,
             timestamp=frame.timestamp,
-            detector_name=self.box_center_detector_name,
-            detector_version=self.box_center_detector_version,
+            detector_name=detector_name,
+            detector_version=detector_version,
             observations=(observation,),
             processing_time_ms=(time.perf_counter() - started) * 1000.0,
             errors=tuple(errors),

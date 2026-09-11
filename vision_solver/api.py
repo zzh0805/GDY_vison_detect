@@ -8,12 +8,14 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+import cv2
 import numpy as np
 
 from handeye_calib.approach.models import HandEyeCalibration
 from handeye_calib.approach.yolo_detector import YoloTargetDetector
 
 from .camera import CameraManager
+from .circle_center_refiner import find_nearest_circle_center
 from .config import AppConfig, load_config, load_tool_offsets
 from .image_writer import ArtifactWriter
 from .logging_utils import get_logger
@@ -117,9 +119,13 @@ class VisionToolTcpSolver:
                          sorted(self.detector.class_names or ()) or "全部",
                          time.perf_counter() - step_started)
             else:
+                circle_enabled = bool(dict(
+                    self.config.matching.get("circle_refinement") or {}
+                ).get("enabled", False))
                 log.info(
-                    "框中心模式已启用: 跳过YOLO启动预加载，"
-                    "由请求code动态选择工件，可用映射=%s",
+                    "无YOLO模式已启用: 跳过YOLO启动预加载，"
+                    "圆心拟合=%s，由请求code动态选择工件，可用映射=%s",
+                    circle_enabled,
                     tool_offsets.code_to_tool)
             step_started = time.perf_counter()
             self.pose_solver = TargetPoseSolver(
@@ -338,29 +344,89 @@ class VisionToolTcpSolver:
             )
             observation = match.observation
         else:
-            selection_mode = "box_center"
+            request_center = np.mean(corners, axis=0)
+            circle_settings = dict(
+                matching.get("circle_refinement") or {})
+            circle_enabled = bool(circle_settings.get("enabled", False))
+            circle_match = None
+            if circle_enabled:
+                distance_scale = 0.5 * (
+                    camera_model.width / float(source_width) +
+                    camera_model.height / float(source_height))
+                circle_match = find_nearest_circle_center(
+                    np.asarray(frame.color), corners, circle_settings,
+                    max_center_distance_px=float(circle_settings.get(
+                        "max_center_distance_px", 250.0)) * distance_scale)
+                if circle_match is None and not bool(circle_settings.get(
+                        "fallback_to_box_center", False)):
+                    raise TaskError(
+                        "NO_CIRCLE_TARGET",
+                        "目标框附近没有找到满足评分和距离限制的圆，"
+                        "本次解算已停止")
+
+            if circle_match is None:
+                selection_mode = "box_center"
+                selected_center = request_center.copy()
+                refined_radius = None
+                refinement_metrics = None
+                if circle_enabled:
+                    log.warning(
+                        "圆心拟合失败，按配置回退到原框中心: code=%s 工件=%s",
+                        request.workpiece_code, selected_tool)
+            else:
+                selection_mode = "nearest_circle_center"
+                selected_center = circle_match.center_px
+                refined_radius = circle_match.radius_px
+                refinement_metrics = {
+                    "circle_score": circle_match.score,
+                    "circle_edge_support": circle_match.edge_support,
+                    "circle_radius_px": circle_match.radius_px,
+                    "circle_distance_to_request_center_px": (
+                        circle_match.distance_to_request_center_px),
+                    "circle_search_roi_xyxy_px": list(
+                        circle_match.search_roi_xyxy_px),
+                    "circle_candidate_count": circle_match.candidate_count,
+                    "circle_accepted_candidate_count": (
+                        circle_match.accepted_candidate_count),
+                    "circle_selection_rule": "nearest_to_request_box_center",
+                }
             batch = self.detector.process_box_center(
                 frame, camera_model, request.task_id,
                 target_region_px=corners,
                 tool_class_name=selected_tool,
-                panel_region_px=panel_region_px)
+                panel_region_px=panel_region_px,
+                refined_center_px=(
+                    selected_center if circle_match is not None else None),
+                refined_radius_px=refined_radius,
+                refinement_metrics=refinement_metrics)
             observation = batch.observations[0]
-            request_center = np.mean(corners, axis=0)
+            polygon = np.asarray(
+                corners, dtype=np.float32).reshape(-1, 1, 2)
+            center_inside = cv2.pointPolygonTest(
+                polygon,
+                (float(selected_center[0]), float(selected_center[1])),
+                False) >= 0.0
+            center_distance = float(np.linalg.norm(
+                selected_center - request_center))
             match = MatchResult(
                 observation=observation,
                 request_center_px=request_center,
-                detection_center_px=request_center.copy(),
-                distance_px=0.0,
-                center_inside_polygon=True,
+                detection_center_px=selected_center.copy(),
+                distance_px=center_distance,
+                center_inside_polygon=center_inside,
                 ordered_corners_px=corners,
             )
             log.info(
-                "检测: 模式=框中心 code=%s 对应工件=%s 中心=%s "
+                "检测: 模式=%s code=%s 对应工件=%s "
+                "原框中心=%s 选中中心=%s 距离=%.1fpx "
                 "有效解算=%d "
                 "耗时=%.1fms（未执行YOLO推理）",
+                selection_mode,
                 request.workpiece_code,
                 selected_tool,
                 np.round(request_center, 2).tolist(),
+                np.round(selected_center, 2).tolist(),
+                center_distance,
                 len(batch.valid_observations()),
                 (time.perf_counter() - step) * 1000.0)
         for error_text in batch.errors:
@@ -405,7 +471,7 @@ class VisionToolTcpSolver:
                   if plane_dist is not None else float("nan")),
                  (float(ray_dist) * 1000.0
                   if ray_dist is not None else float("nan")))
-        log.info("v3.4求解: 目标模式=%s code=%s 类别=%s 工具=%s "
+        log.info("v3.5求解: 目标模式=%s code=%s 类别=%s 工具=%s "
                  "光心参考距离=%.1fmm "
                  "工具偏移xyz=%s rpy=%s 配置sha256=%s 标准TCP=%s 最终TCP=%s",
                  selection_mode,
@@ -438,7 +504,10 @@ class VisionToolTcpSolver:
                     if not tool_offsets.use_yolo else None),
                 "centerSource": (
                     "yolo_detection_center"
-                    if tool_offsets.use_yolo else "request_box_center"),
+                    if tool_offsets.use_yolo else (
+                        "fitted_circle_center"
+                        if circle_match is not None
+                        else "request_box_center")),
             },
             "toolOffsetsHotReload": {
                 "sourcePath": str(tool_offsets.source_path),

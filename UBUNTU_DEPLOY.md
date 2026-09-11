@@ -63,7 +63,7 @@ pgrep -af 'run_service.py'
 bash run_service.sh
 ```
 
-YOLO模式应看到模型准备日志；框中心模式应看到“跳过YOLO启动预加载”。随后应看到相机连接成功及端口监听日志。另开终端验证：
+YOLO模式应看到模型准备日志；无YOLO模式应看到“跳过YOLO启动预加载”和圆心拟合开关。随后应看到相机连接成功及端口监听日志。另开终端验证：
 
 ```bash
 ss -tlnp | grep ':48051 '

@@ -62,6 +62,19 @@ target_matching:
   prefer_center_inside_polygon: true
   # 2026-08-29: 提到500以匹配第二工件konb1标注框与YOLO中心偏差(~364px)。
   max_match_distance_px: 500
+  # use_yolo=false时，在请求target粗框附近用灰度边缘拟合圆心。
+  # 一次请求只保留距离原框中心最近的合格圆，不使用颜色和类别模型。
+  circle_refinement:
+    enabled: true
+    expand_ratio: 0.45
+    min_score: 0.35
+    min_radius_ratio: 0.14
+    max_radius_ratio: 0.46
+    hough_param2: 28
+    # 以source_image_width/height对应的原图像像素为单位。
+    max_center_distance_px: 250
+    # 安全默认：找不到可靠圆就让本次请求失败，不使用可能偏移的框中心。
+    fallback_to_box_center: false
 
 plane_fitting:
   # 固定为外围安装平面；不使用目标自身深度。

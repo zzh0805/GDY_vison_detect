@@ -252,6 +252,12 @@ class AppConfig:
         if int(self.matching.get("source_image_width", 1920)) <= 0 or \
                 int(self.matching.get("source_image_height", 1080)) <= 0:
             raise ValueError("原图像尺寸必须大于0")
+        circle_settings = _mapping(
+            self.matching.get("circle_refinement"),
+            "target_matching.circle_refinement")
+        from .circle_center_refiner import (
+            validate_circle_refinement_settings)
+        validate_circle_refinement_settings(circle_settings)
         http = self.http
         port = int(http.get("listen_port", 48051))
         if port <= 0 or port > 65535:

@@ -12,6 +12,14 @@
 
 ## 当前版本
 
+`v3.5.0`（2026-09-11）更新内容：
+
+- `use_yolo=false` 时不再直接信任粗框中心，而是在粗框附近用灰度边缘拟合圆心；
+- 如果搜索区域内有多个圆，只选择距离请求框中心最近的合格圆，一次请求仍只解算一个目标；
+- 圆拟合不依赖颜色和YOLO类别，适用于模型中没有的圆形按钮、旋钮；
+- 找不到可靠圆时默认终止本次解算，避免机械臂使用可能偏移的框中心；
+- `/snapshot`、`/get_tcp_pose` 请求和成功响应格式保持不变。
+
 `v3.4.0`（2026-09-10）更新内容：
 
 - 无YOLO模式由请求新增的 `code` 动态选择工件，不再锁定 `selected_tool`；
@@ -45,7 +53,7 @@
 ## 项目功能
 
 - 长期独占连接一台SurfacePro50，只在收到请求时采集彩色图和配准点云；
-- 支持YOLO识别并匹配目标，也支持完全跳过YOLO、直接使用客户端框中心；
+- 支持YOLO识别并匹配目标，也支持完全跳过YOLO、在客户端粗框附近拟合最近圆心；
 - 使用目标外围安装平面的点云拟合中心和法向，避免依赖目标自身深度；
 - 根据拍照TCP、手眼标定、50 mm光心参考位和全局修正计算标准活动TCP；
 - 按目标类别叠加工具固定偏移，返回JAKA基座系最终活动TCP；
@@ -85,6 +93,7 @@
 光心参考位姿 × inverse(T_tcp_camera) → 逆手眼活动TCP
 逆手眼活动TCP + pose.tcp_correction → 标准活动TCP
 每次读取tool_offsets.yaml中的目标模式；无YOLO时按请求code映射工件
+无YOLO时在target粗框附近拟合圆，并选择离粗框中心最近的一个
 读取tools.<选定工件>.standard_to_tool
 标准活动TCP × standard_to_tool → 最终工作TCP
 ```
@@ -93,7 +102,7 @@
 
 ## 工具标定热更新
 
-服务启动后可直接修改 [config/tool_offsets.yaml](config/tool_offsets.yaml)。下一次 `/get_tcp_pose` 会在目标选择和位姿计算前重新读取并校验整个文件。相机连接、手眼矩阵和 `pose.tcp_correction` 不会重新初始化；若从框中心模式热切换回YOLO，模型会在首次YOLO请求时按需准备。
+服务启动后可直接修改 [config/tool_offsets.yaml](config/tool_offsets.yaml)。下一次 `/get_tcp_pose` 会在目标选择和位姿计算前重新读取并校验整个文件。相机连接、手眼矩阵和 `pose.tcp_correction` 不会重新初始化；若从无YOLO模式热切换回YOLO，模型会在首次YOLO请求时按需准备。
 
 无YOLO动态工件选择示例：
 
@@ -111,7 +120,24 @@ tools:
       rpy_deg: [-3.005278, -4.276208, -0.141311]
 ```
 
-`use_yolo: true` 保持原有“YOLO中心与请求框匹配”流程，请求 `code` 可以省略。`use_yolo: false` 时不调用YOLO，直接使用请求 `target` 框的中心像素，并用请求中的 `code` 查找具有相同 `tools.<工件>.code` 的已启用工件。每个 `code` 必须是非空字符串且在整个文件中唯一；要叠加对应工具偏移，还应保持 `workflow.yaml` 的 `pose.alignment_mode: tool`。v3.3 的 `selected_tool` 字段允许继续留在文件中，但v3.4无YOLO模式不再使用它。
+`use_yolo: true` 保持原有“YOLO中心与请求框匹配”流程，请求 `code` 可以省略。`use_yolo: false` 时不调用YOLO，而是读取 `workflow.yaml` 的 `target_matching.circle_refinement`，在请求 `target` 粗框附近找圆，并使用离粗框中心最近的合格圆心；请求中的 `code` 仍负责选择具有相同 `tools.<工件>.code` 的已启用工件。每个 `code` 必须是非空字符串且在整个文件中唯一；要叠加对应工具偏移，还应保持 `pose.alignment_mode: tool`。
+
+圆心拟合参数示例：
+
+```yaml
+target_matching:
+  circle_refinement:
+    enabled: true
+    expand_ratio: 0.45
+    min_score: 0.35
+    min_radius_ratio: 0.14
+    max_radius_ratio: 0.46
+    hough_param2: 28
+    max_center_distance_px: 250
+    fallback_to_box_center: false
+```
+
+黄色框/点代表请求粗框及其中心，绿色圆/点代表最终拟合结果，蓝色箭头代表中心修正方向。`circle_refinement` 属于启动配置，修改后需要重启服务；`use_yolo`、`code` 和工具偏移仍然支持热加载。
 
 请求示例：
 

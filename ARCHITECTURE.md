@@ -11,7 +11,7 @@ VisionHttpProtocol（字段检查、rad/deg转换）
     ↓
 vision-task-worker（单线程串行执行所有视觉任务）
     ├─ CameraManager → SurfacePro50SyncAdapter
-    ├─ YoloTargetDetector（YOLO或请求框中心二选一）
+    ├─ YoloTargetDetector（YOLO或无YOLO圆心/框中心二选一）
     ├─ 平面拟合与可选YOLO目标匹配
     ├─ ToolOffsetsLoader → 每次读取config/tool_offsets.yaml
     └─ TargetPoseSolver
@@ -61,7 +61,9 @@ use_yolo=true
 
 use_yolo=false
     → 不执行YOLO推理
-    → 请求target框中心射线与安装平面求交
+    → 在请求target粗框附近用灰度边缘生成圆候选
+    → 只选离粗框中心最近的合格圆心
+    → 拟合圆心射线与安装平面求交
     → 用请求code匹配tools.<工件>.code并选择工件
 ```
 
@@ -104,6 +106,7 @@ standard_to_tool
 | `vision_solver/camera.py` | 旧项目直接取流方式的长期连接包装 |
 | `handeye_calib/surfacepro50_adapter.py` | SurfacePro50/OpenNI底层适配器 |
 | `vision_solver/target_matcher.py` | YOLO模式下标注矩形与检测目标匹配 |
+| `vision_solver/circle_center_refiner.py` | 无YOLO模式下拟合并选择最近圆心 |
 | `vision_solver/pose_solver.py` | 光心参考、逆手眼、标准TCP、工具偏移和最终TCP |
 | `config/tool_offsets.yaml` | 可在服务运行中修改的工具工作位偏移 |
 | `calibrate_tool_offset.py` | 基于标准TCP标定工具偏移 |

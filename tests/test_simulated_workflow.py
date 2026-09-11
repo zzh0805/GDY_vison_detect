@@ -8,6 +8,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 
+import cv2
 import numpy as np
 import yaml
 
@@ -116,6 +117,14 @@ class FakeCamera:
         return 3
 
 
+class FakeCircleCamera(FakeCamera):
+    def _frame(self, with_cloud: bool) -> CameraFrame:
+        frame = super()._frame(with_cloud)
+        cv2.circle(frame.color, (76, 50), 12, (240, 240, 240), 3,
+                   cv2.LINE_AA)
+        return frame
+
+
 def fake_detector(model=None) -> YoloTargetDetector:
     return YoloTargetDetector(
         "unused.pt", model=model or FakeModel(),
@@ -172,7 +181,8 @@ class SimulatedWorkflowTests(unittest.TestCase):
     def write_config(self, alignment_mode: str,
                      live_capture_delay_s: float = 0.0,
                      snapshot_delay_s: float = 0.0,
-                     use_yolo: bool = True) -> None:
+                     use_yolo: bool = True,
+                     circle_refinement_enabled: bool = False) -> None:
         self.write_tool_offsets(use_yolo=use_yolo)
         data = {
             "system": {
@@ -213,6 +223,16 @@ class SimulatedWorkflowTests(unittest.TestCase):
                 "source_image_height": 100,
                 "prefer_center_inside_polygon": True,
                 "max_match_distance_px": 30,
+                "circle_refinement": {
+                    "enabled": circle_refinement_enabled,
+                    "expand_ratio": 0.45,
+                    "min_score": 0.35,
+                    "min_radius_ratio": 0.14,
+                    "max_radius_ratio": 0.46,
+                    "hough_param2": 18,
+                    "max_center_distance_px": 30,
+                    "fallback_to_box_center": False,
+                },
             },
             "plane_fitting": {
                 "surrounding_expand_ratio": 0.5,
@@ -246,11 +266,13 @@ class SimulatedWorkflowTests(unittest.TestCase):
     def http_service(self, alignment_mode="camera_center",
                      live_capture_delay_s=0.0,
                      snapshot_delay_s=0.0,
-                     use_yolo=True):
+                     use_yolo=True,
+                     circle_refinement_enabled=False,
+                     camera_factory=FakeCamera):
         self.write_config(
             alignment_mode, live_capture_delay_s, snapshot_delay_s,
-            use_yolo)
-        camera = FakeCamera()
+            use_yolo, circle_refinement_enabled)
+        camera = camera_factory()
         model = FakeModel()
         camera.yolo_model = model
         solver = VisionToolTcpSolver(
@@ -373,6 +395,23 @@ class SimulatedWorkflowTests(unittest.TestCase):
         self.assertEqual(solved["code"], 200, solved)
         self.assertTrue(np.allclose(
             solved["pos"], [400, 0, 950, 0, 0, 0], atol=1e-5))
+        self.assertEqual(camera.yolo_model.predict_calls, 0)
+
+    def test_no_yolo_circle_refinement_uses_fitted_center(self):
+        # 原框中心x=70，真实圆心x=76。平面z=1000mm、fx=100，圆心对应
+        # 相机x约260mm；叠加工具局部X+100mm后，最终x约360mm。
+        with self.http_service(
+                "tool", use_yolo=False,
+                circle_refinement_enabled=True,
+                camera_factory=FakeCircleCamera,
+        ) as (client, camera):
+            solved = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 55, 35, 85, 65,
+                live=True, code="9-8-1")
+
+        self.assertEqual(set(solved), {"code", "pos"})
+        self.assertEqual(solved["code"], 200, solved)
+        self.assertAlmostEqual(solved["pos"][0], 360.0, delta=15.0)
         self.assertEqual(camera.yolo_model.predict_calls, 0)
 
     def test_target_selection_mode_is_hot_reloaded(self):

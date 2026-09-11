@@ -86,7 +86,19 @@ case:
 bash run_field_test.sh --live --base-label 5 --code 9-8-1
 ```
 
-保存后直接再次运行现场测试，不需要重启服务。此时传入矩形的中心就是目标中心，不会再从YOLO框中二次匹配；服务根据请求 `code` 选择对应的已启用工件。若要应用该工件偏移，确认 `workflow.yaml` 使用 `pose.alignment_mode: tool`。
+保存后直接再次运行现场测试，不需要重启服务。此时不会再调用YOLO；程序在传入矩形附近拟合圆并只使用离矩形中心最近的合格圆心，服务根据请求 `code` 选择对应的已启用工件。若要应用该工件偏移，确认 `workflow.yaml` 使用 `pose.alignment_mode: tool`。
+
+现场第一次启用前检查 `workflow.yaml`：
+
+```yaml
+target_matching:
+  circle_refinement:
+    enabled: true
+    expand_ratio: 0.45
+    fallback_to_box_center: false
+```
+
+修改这组拟合参数后需要重启服务。检测叠加图中黄色为原始框，绿色为实际采用的圆和圆心，蓝色箭头表示修正方向。若没有找到可靠圆，默认返回失败且不输出工作TCP；不要为了让机械臂继续运动而随意开启框中心回退。
 
 只有在坐标、角度单位、方向和安全距离全部人工确认后，才可以将 `work_jaka` 改为 `true`。
 
