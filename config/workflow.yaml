@@ -63,13 +63,30 @@ target_matching:
   # 2026-08-29: 提到500以匹配第二工件konb1标注框与YOLO中心偏差(~364px)。
   max_match_distance_px: 500
   # use_yolo=false时，在请求target粗框附近用灰度边缘拟合圆心。
-  # 一次请求只保留距离原框中心最近的合格圆，不使用颜色和类别模型。
+  # 先选离原框中心最近的同心圆组，再用该组最大有效外圆的圆心。
+  # 这样不会因按钮/旋钮的内圈边缘更清晰而选到偏移的内圆。
   circle_refinement:
     enabled: true
     expand_ratio: 0.45
     min_score: 0.35
-    min_radius_ratio: 0.14
-    max_radius_ratio: 0.46
+    # 半径范围相对于原始target粗框较短边，而不是扩展后的搜索区域。
+    min_radius_ratio: 0.08
+    max_radius_ratio: 0.75
+    min_edge_support: 0.55
+    radius_band_count: 7
+    center_cluster_tolerance_ratio: 0.18
+    outer_circle_min_support_ratio: 0.65
+    # 颜色辅助红/绿/黑目标的候选选择；失败时回退纯边缘外圆。
+    color_fusion:
+      enabled: true
+      # edge最稳：颜色只负责选目标，机械轴心保持最大外圆中心。
+      # weighted_centroid仅供特殊圆形色块试验，不适合带手柄的旋钮。
+      center_mode: edge
+      min_coverage: 0.06
+      score_weight: 0.20
+      center_blend: 0.35
+      max_center_shift_ratio: 0.20
+      selection_weight: 0.20
     hough_param2: 28
     # 以source_image_width/height对应的原图像像素为单位。
     max_center_distance_px: 250

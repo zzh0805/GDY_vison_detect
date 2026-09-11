@@ -62,7 +62,9 @@ use_yolo=true
 use_yolo=false
     → 不执行YOLO推理
     → 在请求target粗框附近用灰度边缘生成圆候选
-    → 只选离粗框中心最近的合格圆心
+    → 读取code对应工件的target_color（红/绿/黑/自动）
+    → 按圆心聚类并用颜色证据选择最近工件组
+    → 使用该组最大有效外圆圆心作为机械轴心
     → 拟合圆心射线与安装平面求交
     → 用请求code匹配tools.<工件>.code并选择工件
 ```
@@ -106,7 +108,7 @@ standard_to_tool
 | `vision_solver/camera.py` | 旧项目直接取流方式的长期连接包装 |
 | `handeye_calib/surfacepro50_adapter.py` | SurfacePro50/OpenNI底层适配器 |
 | `vision_solver/target_matcher.py` | YOLO模式下标注矩形与检测目标匹配 |
-| `vision_solver/circle_center_refiner.py` | 无YOLO模式下拟合并选择最近圆心 |
+| `vision_solver/circle_center_refiner.py` | 无YOLO模式下用红绿黑颜色筛选工件并求最大有效外圆圆心 |
 | `vision_solver/pose_solver.py` | 光心参考、逆手眼、标准TCP、工具偏移和最终TCP |
 | `config/tool_offsets.yaml` | 可在服务运行中修改的工具工作位偏移 |
 | `calibrate_tool_offset.py` | 基于标准TCP标定工具偏移 |

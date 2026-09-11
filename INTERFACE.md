@@ -70,9 +70,9 @@ curl -X POST http://127.0.0.1:48051/snapshot
 
 返回 `pos` 为 JAKA 基座系当前活动 TCP，单位仍为 `mm + RPY rad`。
 
-`config/tool_offsets.yaml` 中 `target_selection.use_yolo: true` 时，`target` 用于从YOLO结果中匹配目标，`code` 不参与类别选择；设为 `false` 时，YOLO完全不参与本次推理，算法在 `target` 粗框附近拟合圆，并只使用离粗框中心最近的合格圆心，根据请求 `code` 查找对应的 `tools` 工件。可选 `base` 仍只用于拟合安装平面。
+`config/tool_offsets.yaml` 中 `target_selection.use_yolo: true` 时，`target` 用于从YOLO结果中匹配目标，`code` 不参与类别选择；设为 `false` 时，YOLO完全不参与本次推理，算法根据请求 `code` 取得对应工件及其 `target_color`，在 `target` 粗框附近用红绿黑颜色筛选工件，再采用最近工件组的最大有效外圆圆心。可选 `base` 仍只用于拟合安装平面。
 
-如果 `system.save_report=true`，磁盘 `result.json` 还会保存坐标链审计字段、`targetSelection` 以及 `toolOffsetsHotReload`。`targetSelection.mode` 会记录 `yolo`、`nearest_circle_center` 或关闭圆拟合时的 `box_center`；圆拟合的评分、半径、候选数量、搜索区域和中心偏移记录在几何质量字段中。HTTP成功响应仍保持只有数字 `code` 与 `pos`。
+如果 `system.save_report=true`，磁盘 `result.json` 还会保存坐标链审计字段、`targetSelection` 以及 `toolOffsetsHotReload`。为兼容现有后台，`targetSelection.mode` 仍记录 `yolo`、`nearest_circle_center` 或关闭圆拟合时的 `box_center`；圆拟合评分、边缘圆心、最终圆心、识别颜色、颜色覆盖率、颜色质心、是否启用实验性质心融合及候选数量记录在几何质量字段中。HTTP成功响应仍保持只有数字 `code` 与 `pos`。
 
 `result.json` 的 `discardedFramePairsBeforeCapture` 记录本次最终采集前主动丢弃的原始彩色/深度帧对数量；服务日志也会输出相同计数。缓存解算该值为0。
 

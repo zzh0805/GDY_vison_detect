@@ -73,6 +73,15 @@ def _validate_tools(value: Any) -> Dict[str, Any]:
                 raise ValueError(f"tools.{class_name}.code必须是字符串")
             if not tool["code"].strip():
                 raise ValueError(f"tools.{class_name}.code不能为空")
+        if "target_color" in tool:
+            if not isinstance(tool["target_color"], str):
+                raise ValueError(
+                    f"tools.{class_name}.target_color必须是字符串")
+            target_color = tool["target_color"].strip().lower()
+            if target_color not in ("auto", "red", "green", "black"):
+                raise ValueError(
+                    f"tools.{class_name}.target_color必须是"
+                    "auto、red、green或black")
     return tools
 
 

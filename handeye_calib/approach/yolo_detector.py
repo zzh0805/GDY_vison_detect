@@ -43,7 +43,7 @@ class YoloTargetDetector:
     box_center_detector_name = "request_box_center_pointcloud"
     box_center_detector_version = "1.0.0"
     circle_center_detector_name = "nearest_circle_center_pointcloud"
-    circle_center_detector_version = "1.0.0"
+    circle_center_detector_version = "1.3.0"
 
     def __init__(
             self,
@@ -864,10 +864,20 @@ class YoloTargetDetector:
             cv2.circle(
                 overlay, center_i, int(round(radius)),
                 color_box, 3, cv2.LINE_AA)
+            edge_center_value = metrics_extra.get("circle_edge_center_px")
+            if (bool(metrics_extra.get("circle_color_fusion_applied")) and
+                    edge_center_value is not None):
+                edge_center_i = tuple(np.rint(
+                    edge_center_value).astype(int))
+                cv2.drawMarker(
+                    overlay, edge_center_i, (255, 0, 255),
+                    cv2.MARKER_TILTED_CROSS, 14, 2, cv2.LINE_AA)
         cv2.circle(overlay, center_i, 5, color_box, -1)
+        color_name = metrics_extra.get("circle_color_name")
         cv2.putText(
             overlay,
-            (("nearest-circle" if refined_center_px is not None
+            (((f"{color_name}-outer-circle" if color_name
+               else "outer-circle") if refined_center_px is not None
               else "box-center") + f":{tool_name}"),
             (int(round(x1)), max(20, int(round(y1)) - 6)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.55, color_box, 2, cv2.LINE_AA)

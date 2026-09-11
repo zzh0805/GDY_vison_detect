@@ -16,10 +16,11 @@
 | `pose.standoff_mm` | `50.0` | 光心参考位到目标平面的距离 |
 | `pose.pipeline_version` | `2` | 强制使用v2统一坐标链，防止误载v1配置 |
 | `tool_offsets.file` | `./tool_offsets.yaml` | 每次目标TCP解算重新读取的工具标定文件 |
-| `target_selection.use_yolo` | `true` | `true`使用YOLO；`false`使用请求框附近最近圆心 |
+| `target_selection.use_yolo` | `true` | `true`使用YOLO；`false`使用请求框附近最大有效外圆圆心 |
 | `tools.<工件>.code` | 例如 `9-8-1` | 无YOLO模式由请求code动态选择工件；每个值必须唯一 |
+| `tools.<工件>.target_color` | `red/green/black/auto` | 无YOLO模式期望颜色；缺省为自动识别 |
 | `target_matching.source_image_width/height` | `1920/1080` | 客户端框选坐标对应的原图尺寸 |
-| `target_matching.circle_refinement.enabled` | `true` | 无YOLO时启用最近圆心拟合 |
+| `target_matching.circle_refinement.enabled` | `true` | 无YOLO时启用最大有效外圆拟合 |
 
 如果更换相机、相机与法兰的安装关系、活动TCP或工具安装位置，必须重新验证相机标定、手眼标定及 `standard_to_tool`，不能只改IP。
 
@@ -96,6 +97,7 @@ target_selection:
 tools:
   class_name:
     code: "9-8-1"
+    target_color: green
     tool_id: tool_name
     enabled: true
     standard_to_tool:
@@ -103,12 +105,12 @@ tools:
       rpy_deg: [RX, RY, RZ]
 ```
 
-`xyz_mm` 和 `rpy_deg` 必须分别是3个有限数字；可选 `standoff_mm` 必须为非负数。文件无效时本次请求返回 `TOOL_CONFIG_RELOAD_FAILED`，不会使用内存中的旧参数。修复并保存后下一次请求自动恢复。
+`xyz_mm` 和 `rpy_deg` 必须分别是3个有限数字；可选 `standoff_mm` 必须为非负数。`target_color` 可填写 `red`、`green`、`black` 或 `auto`，不填写等同于 `auto`。文件无效时本次请求返回 `TOOL_CONFIG_RELOAD_FAILED`，不会使用内存中的旧参数。修复并保存后下一次请求自动恢复。
 
 ### 目标选择模式
 
 - `use_yolo: true`：保持原有流程。YOLO先检测并分类，再用请求 `target` 框中心选择最近的检测目标；请求 `code` 可以省略。
-- `use_yolo: false`：本次请求不执行YOLO推理。算法在请求 `target` 粗框附近寻找圆候选，按圆心到粗框中心的距离排序，只使用最近的合格圆心；随后根据请求 `code` 查找具有相同 `tools.<工件>.code` 的工件。
+- `use_yolo: false`：本次请求不执行YOLO推理。算法将请求 `target` 粗框附近的圆候选按圆心聚类，使用本次 `code` 对应工件的 `target_color` 参与筛选，再选择最近工件组的最大有效外圆圆心；随后叠加该工件工具偏移。
 - 工件 `code` 必须是非空字符串并全局唯一；对应工件必须 `enabled: true`。缺少code返回400，未知或禁用的code返回422。
 - 模式、code映射和工具偏移一起热加载，修改保存后下一次解算生效，无需重启。初始即为无YOLO模式时不会预加载YOLO；以后热切换为YOLO时会在第一次YOLO请求中按需加载。
 - v3.3配置中的 `target_selection.selected_tool` 可以暂时保留以方便文件升级，但v3.4无YOLO流程会忽略它。
@@ -120,12 +122,22 @@ tools:
 - `enabled`：是否在无YOLO分支启用圆心修正；关闭时保留v3.4的原框中心行为；
 - `expand_ratio`：相对请求框宽高向外扩大的搜索比例；
 - `min_score`：圆候选最低综合评分；
-- `min_radius_ratio/max_radius_ratio`：圆半径相对搜索ROI短边的范围；
+- `min_radius_ratio/max_radius_ratio`：圆半径相对原始请求框短边的范围；
+- `min_edge_support`：单个圆候选的最低边缘支持度；
+- `radius_band_count`：分多少个半径段检测，使同心内外圆都能进入候选；
+- `center_cluster_tolerance_ratio`：同一工件的圆心聚类容差，相对原始请求框短边；
+- `outer_circle_min_support_ratio`：外圆边缘支持度至少达到组内最佳值的比例，用于排除虚假大圆；
+- `color_fusion.enabled`：是否使用红、绿、黑颜色证据筛选候选工件；
+- `color_fusion.center_mode`：`edge` 使用最大有效外圆圆心（正式运行默认值）；`weighted_centroid` 才会把颜色质心按权重混入圆心，仅供实验；
+- `color_fusion.min_coverage`：候选圆内部颜色连通区域的最低覆盖率，当前为较宽松的 `0.06`；
+- `color_fusion.score_weight/selection_weight`：颜色对圆候选评分和工件组选择的权重；
+- `color_fusion.center_blend`：仅在 `center_mode: weighted_centroid` 时生效，表示颜色质心对最终圆心的融合比例；
+- `color_fusion.max_center_shift_ratio`：仅在 `weighted_centroid` 时生效，限制颜色最多修正多少个圆半径；
 - `hough_param2`：霍夫圆阈值，越高越严格；
 - `max_center_distance_px`：拟合圆心距离请求框中心的最大距离，单位为原始输入图像像素；
 - `fallback_to_box_center`：找不到圆时是否回退框中心。正式机械臂运行建议保持 `false`，使本次请求直接失败。
 
-这些参数位于固定的 `workflow.yaml`，修改后需要重启服务。拟合只使用灰度边缘，不使用颜色；检测图中黄色是原框，绿色是选中的最近圆，蓝色箭头是中心修正量。
+这些参数位于固定的 `workflow.yaml`，修改后需要重启服务。颜色采用较宽松的HSV阈值；颜色不足时自动回退纯边缘结果。检测图中黄色是原框，绿色是最终采用的最大有效外圆及轴心，蓝色箭头是相对请求框的中心修正量。默认 `edge` 模式没有颜色质心位移；实验性的 `weighted_centroid` 模式才用洋红叉标记融合前的纯边缘圆心。
 
 ## Ubuntu SDK环境
 

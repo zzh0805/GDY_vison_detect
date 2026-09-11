@@ -12,10 +12,30 @@
 
 ## 当前版本
 
+`v3.5.3`（2026-09-11）更新内容：
+
+- 颜色继续用于从相邻目标中筛选正确的红、绿、黑工件；
+- 最终机械轴心固定采用最大有效外圆圆心，不再默认混入颜色区域质心；
+- 避免黑色旋钮手柄、红色按钮高光/阴影把最终中心拉偏；
+- 保留可选的 `weighted_centroid` 实验模式，正式运行默认使用 `center_mode: edge`。
+
+`v3.5.2`（2026-09-11）更新内容：
+
+- 无YOLO模式把红、绿、黑HSV颜色证据与最大有效外圆融合；
+- 每个工件可用热加载字段 `target_color` 指定期望颜色，旧配置缺少该字段时自动识别；
+- 颜色证据不足时自动回退纯边缘外圆，不会因反光或曝光变化直接停止；
+- HTTP输入输出保持不变，运行报告新增颜色、覆盖率、颜色质心和融合状态。
+
+`v3.5.1`（2026-09-11）更新内容：
+
+- 圆形工件改为“先选离请求框中心最近的同心圆组，再选该组最大有效外圆”；
+- 分半径段搜索内外圆，并过滤边缘支持不足的虚假大圆，避免选中偏心内圈；
+- HTTP输入输出和 `targetSelection.mode` 保持兼容，报告新增同心圆组候选数量与选择规则。
+
 `v3.5.0`（2026-09-11）更新内容：
 
 - `use_yolo=false` 时不再直接信任粗框中心，而是在粗框附近用灰度边缘拟合圆心；
-- 如果搜索区域内有多个圆，只选择距离请求框中心最近的合格圆，一次请求仍只解算一个目标；
+- 如果搜索区域内有多个工件，只选择离请求框中心最近的工件，一次请求仍只解算一个目标；
 - 圆拟合不依赖颜色和YOLO类别，适用于模型中没有的圆形按钮、旋钮；
 - 找不到可靠圆时默认终止本次解算，避免机械臂使用可能偏移的框中心；
 - `/snapshot`、`/get_tcp_pose` 请求和成功响应格式保持不变。
@@ -53,7 +73,7 @@
 ## 项目功能
 
 - 长期独占连接一台SurfacePro50，只在收到请求时采集彩色图和配准点云；
-- 支持YOLO识别并匹配目标，也支持完全跳过YOLO、在客户端粗框附近拟合最近圆心；
+- 支持YOLO识别并匹配目标，也支持完全跳过YOLO、用红绿黑颜色筛选目标并采用最大有效外圆圆心；
 - 使用目标外围安装平面的点云拟合中心和法向，避免依赖目标自身深度；
 - 根据拍照TCP、手眼标定、50 mm光心参考位和全局修正计算标准活动TCP；
 - 按目标类别叠加工具固定偏移，返回JAKA基座系最终活动TCP；
@@ -93,7 +113,7 @@
 光心参考位姿 × inverse(T_tcp_camera) → 逆手眼活动TCP
 逆手眼活动TCP + pose.tcp_correction → 标准活动TCP
 每次读取tool_offsets.yaml中的目标模式；无YOLO时按请求code映射工件
-无YOLO时在target粗框附近拟合圆，并选择离粗框中心最近的一个
+无YOLO时读取工件target_color筛选目标，采用最大有效外圆圆心
 读取tools.<选定工件>.standard_to_tool
 标准活动TCP × standard_to_tool → 最终工作TCP
 ```
@@ -113,6 +133,7 @@ target_selection:
 tools:
   greenbtn:
     code: "9-8-1"
+    target_color: green
     tool_id: tool_green_button
     enabled: true
     standard_to_tool:
@@ -120,7 +141,9 @@ tools:
       rpy_deg: [-3.005278, -4.276208, -0.141311]
 ```
 
-`use_yolo: true` 保持原有“YOLO中心与请求框匹配”流程，请求 `code` 可以省略。`use_yolo: false` 时不调用YOLO，而是读取 `workflow.yaml` 的 `target_matching.circle_refinement`，在请求 `target` 粗框附近找圆，并使用离粗框中心最近的合格圆心；请求中的 `code` 仍负责选择具有相同 `tools.<工件>.code` 的已启用工件。每个 `code` 必须是非空字符串且在整个文件中唯一；要叠加对应工具偏移，还应保持 `pose.alignment_mode: tool`。
+`use_yolo: true` 保持原有“YOLO中心与请求框匹配”流程，请求 `code` 可以省略。`use_yolo: false` 时不调用YOLO，而是读取 `workflow.yaml` 的 `target_matching.circle_refinement`：先把请求 `target` 粗框附近的内外圆按圆心聚类，选择离粗框中心最近且符合 `target_color` 的工件组，再采用该组最大且边缘支持可靠的外圆圆心。颜色只负责筛选目标，不改变最终机械轴心。请求中的 `code` 仍负责选择具有相同 `tools.<工件>.code` 的已启用工件。每个 `code` 必须是非空字符串且在整个文件中唯一；要叠加对应工具偏移，还应保持 `pose.alignment_mode: tool`。
+
+`target_color` 可填写 `red`、`green`、`black` 或 `auto`。不填写等同于 `auto`；颜色证据不可靠时自动使用纯边缘结果。
 
 圆心拟合参数示例：
 
@@ -130,14 +153,26 @@ target_matching:
     enabled: true
     expand_ratio: 0.45
     min_score: 0.35
-    min_radius_ratio: 0.14
-    max_radius_ratio: 0.46
+    min_radius_ratio: 0.08
+    max_radius_ratio: 0.75
+    min_edge_support: 0.55
+    radius_band_count: 7
+    center_cluster_tolerance_ratio: 0.18
+    outer_circle_min_support_ratio: 0.65
+    color_fusion:
+      enabled: true
+      center_mode: edge
+      min_coverage: 0.06
+      score_weight: 0.20
+      center_blend: 0.35
+      max_center_shift_ratio: 0.20
+      selection_weight: 0.20
     hough_param2: 28
     max_center_distance_px: 250
     fallback_to_box_center: false
 ```
 
-黄色框/点代表请求粗框及其中心，绿色圆/点代表最终拟合结果，蓝色箭头代表中心修正方向。`circle_refinement` 属于启动配置，修改后需要重启服务；`use_yolo`、`code` 和工具偏移仍然支持热加载。
+黄色框/点代表请求粗框及其中心，绿色圆/点代表最终采用的最大有效外圆及机械轴心，蓝色箭头代表中心修正方向。默认 `center_mode: edge` 时不会显示洋红叉；只有启用实验性的 `weighted_centroid` 时，洋红叉才表示融合前的纯边缘圆心。`circle_refinement` 属于启动配置，修改后需要重启服务；`use_yolo`、`code`、`target_color` 和工具偏移支持热加载。
 
 请求示例：
 

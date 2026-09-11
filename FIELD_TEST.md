@@ -86,7 +86,7 @@ case:
 bash run_field_test.sh --live --base-label 5 --code 9-8-1
 ```
 
-保存后直接再次运行现场测试，不需要重启服务。此时不会再调用YOLO；程序在传入矩形附近拟合圆并只使用离矩形中心最近的合格圆心，服务根据请求 `code` 选择对应的已启用工件。若要应用该工件偏移，确认 `workflow.yaml` 使用 `pose.alignment_mode: tool`。
+保存后直接再次运行现场测试，不需要重启服务。此时不会再调用YOLO；程序根据请求 `code` 读取工件的 `target_color`，在传入矩形附近用红绿黑颜色筛选目标，并使用最近工件组的最大有效外圆圆心。若要应用该工件偏移，确认 `workflow.yaml` 使用 `pose.alignment_mode: tool`。
 
 现场第一次启用前检查 `workflow.yaml`：
 

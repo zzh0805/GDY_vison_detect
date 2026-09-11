@@ -7,63 +7,77 @@ version: 1
 
 # v3.4目标选择（每次解算热加载，修改后不需要重启服务）：
 # use_yolo: true  -> 保持原流程，用YOLO检测中心匹配请求框。
-# use_yolo: false -> 完全跳过YOLO，以请求target框的几何中心作为目标中心；
-#                    根据/get_tcp_pose请求中的code动态选择工件/工具偏移。
+# use_yolo: false -> 完全跳过YOLO，在请求target框附近融合圆边缘与颜色；
+#                    根据code动态选择工件、target_color和工具偏移。
 # 每个可供无YOLO模式选择的工件都要配置唯一code。
+# target_color可填red、green、black或auto；修改后下一次解算热生效。
 target_selection:
-  use_yolo: true
+  use_yolo: false
 
 tools:
   greenbtn:
     code: "9-8-1"
+    target_color: green
     tool_id: tool_green_button
     enabled: true
     # 由v1现场示教结果数学迁移；详见 migration/TOOL_OFFSET_MIGRATION.md。
     standard_to_tool:
-      xyz_mm: [109.525640, 52.685308, -16.277166]
+      xyz_mm: [102.574324, 60.092095, -9.508215]
       rpy_deg: [-3.005278, -4.276208, -0.141311]
 
   redbtn:
     code: "9-8-2"
+    target_color: red
     tool_id: tool_red_button
     enabled: true
     # 与greenbtn同一物理工具，共用迁移后的偏移。
     standard_to_tool:
-      xyz_mm: [109.525640, 52.685308, -16.277166]
+      xyz_mm: [102.574324, 60.092095, -9.508215]
       rpy_deg: [-3.005278, -4.276208, -0.141311]
 
-  run:
-    # 示例映射，请按现场实际名称确认后修改。
-    code: "9-7-2"
-    tool_id: tool_run
+  scrambtn:
+    code: "9-8-3"
+    target_color: red
+    tool_id: tool_scram_button
     enabled: true
     standard_to_tool:
-      xyz_mm: [0.0, 0.0, 0.0]
-      rpy_deg: [0.0, 0.0, 0.0]
+      xyz_mm: [116.6696, 12.2488, -23.8014]
+      rpy_deg: [-5.9920, -0.4126, -0.1006]
 
-  konb1:
-    # 示例映射，请按现场实际名称确认后修改。
-    code: "9-7-3"
-    tool_id: tool_knob_1
+  breaker:
+    code: "9-7-2"
+    target_color: black
+    tool_id: tool_breaker
     enabled: true
     standard_to_tool:
-      xyz_mm: [144.6178, -15.8401, -16.9575]
+      xyz_mm: [10.1490, 261.3742, 116.8814]
+      rpy_deg: [-89.1846, -43.5939, -141.9844]
+
+  frameswitch:
+    code: "9-7-3"
+    target_color: black
+    tool_id: tool_frame_switch
+    enabled: true
+    standard_to_tool:
+      xyz_mm: [-161.2098, 80.1526, 89.9863]
+      rpy_deg: [81.1738, 43.7884, 38.1370]
+
+  blackkonb:
+    # 示例映射，请按现场实际名称确认后修改。
+    code: "9-8-5"
+    target_color: black
+    tool_id: tool_black_konb
+    enabled: true
+    standard_to_tool:
+      xyz_mm: [144.529508, -15.744035, -9.958716]
       rpy_deg: [-0.0006, -0.0020, 0.0004]
 
   redkonb:
     # 示例映射，请按现场实际名称确认后修改。
     code: "9-8-4"
-    tool_id: tool_red_knob
+    target_color: red
+    tool_id: tool_red_konb
     enabled: true
     standard_to_tool:
-      xyz_mm: [152.3221, -9.8886, -21.3184]
+      xyz_mm: [142.335358, -7.245235, -16.391170]
       rpy_deg: [0.6305, -0.0013, 0.0012]
-
-  # 红色急停开关9-8-3尚无已确认的工件名称和偏移，确认后按此格式增加：
-  # emergency_stop:
-  #   code: "9-8-3"
-  #   tool_id: tool_emergency_stop
-  #   enabled: true
-  #   standard_to_tool:
-  #     xyz_mm: [待标定, 待标定, 待标定]
-  #     rpy_deg: [待标定, 待标定, 待标定]

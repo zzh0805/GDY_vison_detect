@@ -167,6 +167,7 @@ class SimulatedWorkflowTests(unittest.TestCase):
                 "tools": {
                     "panel": {
                         "code": "9-8-1",
+                        "target_color": "green",
                         "tool_id": "tool-panel",
                         "enabled": True,
                         "standard_to_tool": {
@@ -227,8 +228,21 @@ class SimulatedWorkflowTests(unittest.TestCase):
                     "enabled": circle_refinement_enabled,
                     "expand_ratio": 0.45,
                     "min_score": 0.35,
-                    "min_radius_ratio": 0.14,
-                    "max_radius_ratio": 0.46,
+                    "min_radius_ratio": 0.08,
+                    "max_radius_ratio": 0.75,
+                    "min_edge_support": 0.55,
+                    "radius_band_count": 7,
+                    "center_cluster_tolerance_ratio": 0.18,
+                    "outer_circle_min_support_ratio": 0.65,
+                    "color_fusion": {
+                        "enabled": True,
+                        "center_mode": "edge",
+                        "min_coverage": 0.06,
+                        "score_weight": 0.20,
+                        "center_blend": 0.35,
+                        "max_center_shift_ratio": 0.20,
+                        "selection_weight": 0.20,
+                    },
                     "hough_param2": 18,
                     "max_center_distance_px": 30,
                     "fallback_to_box_center": False,
@@ -505,6 +519,18 @@ class SimulatedWorkflowTests(unittest.TestCase):
             yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
             encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "code必须唯一"):
+            load_tool_offsets(self.tool_offsets_path)
+
+    def test_invalid_target_color_is_rejected(self):
+        self.write_tool_offsets()
+        data = yaml.safe_load(
+            self.tool_offsets_path.read_text(encoding="utf-8"))
+        data["tools"]["panel"]["target_color"] = "blue"
+        self.tool_offsets_path.write_text(
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+            encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "target_color"):
             load_tool_offsets(self.tool_offsets_path)
 
     def test_v32_tool_file_without_target_selection_defaults_to_yolo(self):

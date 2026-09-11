@@ -349,14 +349,19 @@ class VisionToolTcpSolver:
                 matching.get("circle_refinement") or {})
             circle_enabled = bool(circle_settings.get("enabled", False))
             circle_match = None
+            expected_color = "auto"
             if circle_enabled:
                 distance_scale = 0.5 * (
                     camera_model.width / float(source_width) +
                     camera_model.height / float(source_height))
+                expected_color = str(
+                    tool_offsets.tools[selected_tool].get(
+                        "target_color", "auto"))
                 circle_match = find_nearest_circle_center(
                     np.asarray(frame.color), corners, circle_settings,
                     max_center_distance_px=float(circle_settings.get(
-                        "max_center_distance_px", 250.0)) * distance_scale)
+                        "max_center_distance_px", 250.0)) * distance_scale,
+                    expected_color=expected_color)
                 if circle_match is None and not bool(circle_settings.get(
                         "fallback_to_box_center", False)):
                     raise TaskError(
@@ -377,10 +382,23 @@ class VisionToolTcpSolver:
                 selection_mode = "nearest_circle_center"
                 selected_center = circle_match.center_px
                 refined_radius = circle_match.radius_px
+                log.info(
+                    "颜色外圆拟合: code=%s 工件=%s 期望颜色=%s "
+                    "识别颜色=%s 覆盖率=%.3f 融合=%s "
+                    "边缘圆心=%s 最终圆心=%s 半径=%.1fpx",
+                    request.workpiece_code, selected_tool, expected_color,
+                    circle_match.color_name or "无/纯边缘",
+                    circle_match.color_coverage,
+                    circle_match.color_fusion_applied,
+                    np.round(circle_match.edge_center_px, 2).tolist(),
+                    np.round(circle_match.center_px, 2).tolist(),
+                    circle_match.radius_px)
                 refinement_metrics = {
                     "circle_score": circle_match.score,
                     "circle_edge_support": circle_match.edge_support,
                     "circle_radius_px": circle_match.radius_px,
+                    "circle_edge_center_px": (
+                        circle_match.edge_center_px.tolist()),
                     "circle_distance_to_request_center_px": (
                         circle_match.distance_to_request_center_px),
                     "circle_search_roi_xyxy_px": list(
@@ -388,7 +406,19 @@ class VisionToolTcpSolver:
                     "circle_candidate_count": circle_match.candidate_count,
                     "circle_accepted_candidate_count": (
                         circle_match.accepted_candidate_count),
-                    "circle_selection_rule": "nearest_to_request_box_center",
+                    "circle_selected_cluster_candidate_count": (
+                        circle_match.selected_cluster_candidate_count),
+                    "circle_color_name": circle_match.color_name,
+                    "circle_color_score": circle_match.color_score,
+                    "circle_color_coverage": circle_match.color_coverage,
+                    "circle_color_center_px": (
+                        None if circle_match.color_center_px is None
+                        else circle_match.color_center_px.tolist()),
+                    "circle_color_fusion_applied": (
+                        circle_match.color_fusion_applied),
+                    "circle_selection_rule": (
+                        "expected_color_plus_nearest_cluster_then_"
+                        "largest_valid_circle"),
                 }
             batch = self.detector.process_box_center(
                 frame, camera_model, request.task_id,
@@ -471,7 +501,7 @@ class VisionToolTcpSolver:
                   if plane_dist is not None else float("nan")),
                  (float(ray_dist) * 1000.0
                   if ray_dist is not None else float("nan")))
-        log.info("v3.5求解: 目标模式=%s code=%s 类别=%s 工具=%s "
+        log.info("v3.5.3求解: 目标模式=%s code=%s 类别=%s 工具=%s "
                  "光心参考距离=%.1fmm "
                  "工具偏移xyz=%s rpy=%s 配置sha256=%s 标准TCP=%s 最终TCP=%s",
                  selection_mode,
