@@ -4,21 +4,32 @@ http_test:
   timeout_s: 60.0
 case:
   task_id: field-test
+  # use_yolo=false时必填；也可运行时用--code覆盖。
+  code: "9-8-1"
   capture_file_name: capture.png
-  image_file: ''
-  labelme_file: ''
-  labelme_target_label: request_target
+  image_file: /home/nvidia/workspace/vision/GDY_vision_detect_service/GDY_vison_detect_v3/shared_images/20260908163717.jpg
+  labelme_file: /home/nvidia/workspace/vision/GDY_vision_detect_service/GDY_vison_detect_v3/shared_images/20260908163717.json
+  labelme_target_label: 1
   labelme_shape_index: 0
-  capture_tcp_mm_rpy_deg: null
+  capture_tcp_mm_rpy_deg:
+  - 680.5328498404974
+  - -10.958951338583734
+  - -263.1974118242536
+  - 86.1328431165129
+  - -47.77145870510806
+  - 99.1793938096033
   captured_image_width: 1920
   captured_image_height: 1080
-  captured_at_unix_s: null
+  captured_at_unix_s: 1788856637.24
   taught_tcp_mm_rpy_deg: null
 jaka_test:
   ip: 192.168.16.158
   sdk_path: ''
-  start_jaka: false
+  start_jaka: true
   work_jaka: false
+  # 按当次点云拟合的柜体法向自动进入；这里只配置反退预备距离。
+  # 车正对、侧对或斜对柜体时无需改成基座X/Y方向。
+  approach_distance_mm: 200.0
   move_speed_mm_s: 100.0
   move_accel_mm_s2: 300.0
   settle_s: 1.0

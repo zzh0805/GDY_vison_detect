@@ -47,7 +47,7 @@ def _finite_number(value: Any, name: str) -> float:
 
 
 class VisionHttpProtocol:
-    """只公开/snapshot和/get_tcp_pose需要的字段。"""
+    """公开拍照和TCP解算所需的最小HTTP边界。"""
 
     def __init__(self, solver: Any):
         self.solver = solver
@@ -71,6 +71,95 @@ class VisionHttpProtocol:
             return self._failure(result)
         return {"code": 200, "path": str(result["imagePath"])}
 
+    def capture_color(self, payload: Mapping[str, Any]) -> dict:
+        """只采集彩色图；不创建或修改HTTP三维快照缓存。"""
+        if not isinstance(payload, Mapping):
+            return {"code": 400, "status": "请求体必须是JSON对象"}
+        dataset = payload.get("dataset", "datas_get")
+        file_name = payload.get("fileName", "")
+        if not isinstance(dataset, str) or not dataset.strip():
+            return {"code": 400, "status": "dataset必须是非空字符串"}
+        if not isinstance(file_name, str):
+            return {"code": 400, "status": "fileName必须是字符串"}
+        try:
+            discard_s = _finite_number(
+                payload.get("discardStaleFramesS", 0.0),
+                "discardStaleFramesS")
+            if discard_s < 0.0 or discard_s > 10.0:
+                raise ValueError("discardStaleFramesS必须在0到10秒之间")
+        except ValueError as exc:
+            return {"code": 400, "status": str(exc)}
+        result = self.solver.handle_task({
+            "taskType": "capture_annotation_image",
+            "taskId": _task_id("color"),
+            "datasetName": dataset.strip(),
+            "fileName": file_name.strip(),
+            "discardStaleFramesS": discard_s,
+        }, timeout_s=self.timeout_s)
+        if not result.get("ok"):
+            return self._failure(result)
+        return {"code": 200, "path": str(result["imagePath"])}
+
+    def capture_dataset_reference(self, payload: Mapping[str, Any]) -> dict:
+        """数据采集专用三维参考入口；现有生产接口及响应保持不变。"""
+        if not isinstance(payload, Mapping):
+            return {"code": 400, "status": "请求体必须是JSON对象"}
+        try:
+            dataset = payload.get("dataset", "datas_get")
+            file_name = payload.get("fileName", "reference.png")
+            if not isinstance(dataset, str) or not dataset.strip():
+                raise ValueError("dataset必须是非空字符串")
+            if not isinstance(file_name, str):
+                raise ValueError("fileName必须是字符串")
+            matching = self.solver.config.matching
+            width = int(matching.get("source_image_width", 1920))
+            height = int(matching.get("source_image_height", 1080))
+            roi_corners = self._parse_rect(
+                payload.get("roi"), "roi", width, height)
+            discard_s = _finite_number(
+                payload.get("discardStaleFramesS", 0.0),
+                "discardStaleFramesS")
+            if discard_s < 0.0 or discard_s > 10.0:
+                raise ValueError("discardStaleFramesS必须在0到10秒之间")
+            geometry = payload.get("geometry", {})
+            if not isinstance(geometry, Mapping):
+                raise ValueError("geometry必须是JSON对象")
+            allowed = {
+                "plane_expand_ratio", "exclude_roi_margin_ratio",
+                "min_plane_points", "max_plane_sample_points",
+                "ransac_threshold_mm", "ransac_iterations",
+                "min_inlier_ratio", "max_plane_rms_mm",
+            }
+            unknown = set(geometry) - allowed
+            if unknown:
+                raise ValueError(
+                    f"geometry包含未知参数{sorted(unknown)!r}")
+            geometry = {
+                str(key): _finite_number(value, f"geometry.{key}")
+                for key, value in geometry.items()
+            }
+        except (TypeError, ValueError) as exc:
+            return {"code": 400, "status": str(exc)}
+        result = self.solver.handle_task({
+            "taskType": "capture_dataset_reference",
+            "taskId": _task_id("dataset-reference"),
+            "datasetName": dataset.strip(),
+            "fileName": file_name.strip(),
+            "roiCornersPx": roi_corners,
+            "discardStaleFramesS": discard_s,
+            "geometry": geometry,
+        }, timeout_s=self.timeout_s)
+        if not result.get("ok"):
+            return self._failure(result)
+        return {
+            "code": 200,
+            "path": str(result["imagePath"]),
+            "targetCameraMm": result["targetCameraMm"],
+            "roiCornersCameraMm": result["roiCornersCameraMm"],
+            "planeNormalCamera": result["planeNormalCamera"],
+            "quality": result["quality"],
+        }
+
     @staticmethod
     def _parse_rect(rect: Any, name: str, width: int, height: int) -> list:
         if not isinstance(rect, Mapping):
@@ -88,9 +177,10 @@ class VisionHttpProtocol:
                 f"{name}框选坐标必须位于{width}x{height}原图范围内")
         return [[left, top], [right, top], [right, bottom], [left, bottom]]
 
-    def get_tcp_pose(self, payload: Mapping[str, Any]) -> dict:
+    def _solve_tcp_pose(self, payload: Mapping[str, Any]) -> tuple[Any, dict]:
+        """执行一次TCP解算，同时保留正式HTTP响应和内部完整结果。"""
         if not isinstance(payload, Mapping):
-            return {"code": 400, "status": "请求体必须是JSON对象"}
+            return None, {"code": 400, "status": "请求体必须是JSON对象"}
         try:
             pos = np.asarray(payload.get("pos"), dtype=np.float64)
             if pos.size != 6:
@@ -122,7 +212,7 @@ class VisionHttpProtocol:
                     raise ValueError("code必须是非空字符串")
                 workpiece_code = raw_code.strip()
         except (TypeError, ValueError) as exc:
-            return {"code": 400, "status": str(exc)}
+            return None, {"code": 400, "status": str(exc)}
 
         # HTTP边界是mm+RPY(rad)；现有且已现场标定的核心保持mm+RPY(deg)。
         internal_pos = pos.copy()
@@ -143,9 +233,47 @@ class VisionHttpProtocol:
             task["baseCornersPx"] = base_corners
         result = self.solver.handle_task(task, timeout_s=self.timeout_s)
         if not result.get("ok"):
-            return self._failure(result)
+            return None, self._failure(result)
         target = np.asarray(
             result["targetTcpMmRpyDeg"], dtype=np.float64).reshape(6)
         target[3:] = np.radians(target[3:])
         # 成功响应严格只有code和pos。
-        return {"code": 200, "pos": target.tolist()}
+        return result, {"code": 200, "pos": target.tolist()}
+
+    def get_tcp_pose(self, payload: Mapping[str, Any]) -> dict:
+        """正式后台接口；成功响应继续严格保持code和pos两个字段。"""
+        _, response = self._solve_tcp_pose(payload)
+        return response
+
+    def get_tcp_pose_with_approach(self, payload: Mapping[str, Any]) -> dict:
+        """运动脚本专用入口，额外返回当次柜体法向进入方向。
+
+        该入口与正式/get_tcp_pose分离，避免改变既有后台协议。方向采用
+        pose_solver已经转换到JAKA基座系的approachDirectionBase。
+        """
+        result, response = self._solve_tcp_pose(payload)
+        if result is None:
+            return response
+        try:
+            geometry = result.get("geometry")
+            if not isinstance(geometry, Mapping):
+                raise ValueError("解算结果缺少geometry")
+            direction = np.asarray(
+                geometry.get("approachDirectionBase"),
+                dtype=np.float64).reshape(3)
+            norm = float(np.linalg.norm(direction))
+            if not np.isfinite(direction).all() or not math.isfinite(norm) or \
+                    norm < 1e-9:
+                raise ValueError("approachDirectionBase不是有效方向")
+            direction /= norm
+        except (TypeError, ValueError) as exc:
+            return {
+                "code": 422,
+                "status": f"无法生成安全进入方向: {exc}",
+            }
+        return {
+            "code": 200,
+            "pos": response["pos"],
+            "approachDirectionBase": direction.tolist(),
+            "approachDirectionSource": "fitted_panel_normal",
+        }

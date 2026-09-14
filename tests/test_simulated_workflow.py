@@ -336,6 +336,26 @@ class SimulatedWorkflowTests(unittest.TestCase):
         self.assertEqual(camera.frame_id, 1)
         self.assertFalse(camera.connected)
 
+    def test_motion_endpoint_returns_fitted_panel_direction_end_to_end(self):
+        with self.http_service() as (client, camera):
+            solved = client.get_tcp_pose_with_approach(
+                [0, 0, 0, 0, 0, 0], 40, 40, 60, 60, live=True)
+
+        self.assertEqual(set(solved), {
+            "code", "pos", "approachDirectionBase",
+            "approachDirectionSource",
+        })
+        self.assertEqual(solved["code"], 200, solved)
+        self.assertTrue(np.allclose(
+            solved["pos"], [0, 0, 950, 0, 0, 0], atol=1e-5))
+        self.assertTrue(np.allclose(
+            solved["approachDirectionBase"], [0, 0, 1], atol=1e-8))
+        self.assertAlmostEqual(
+            float(np.linalg.norm(solved["approachDirectionBase"])), 1.0)
+        self.assertEqual(
+            solved["approachDirectionSource"], "fitted_panel_normal")
+        self.assertEqual(camera.frame_id, 1)
+
     def test_live_capture_discards_stale_frames_during_stable_period(self):
         with self.http_service(
                 "camera_center", live_capture_delay_s=4.0

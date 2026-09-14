@@ -17,6 +17,7 @@ from handeye_calib.approach.yolo_detector import YoloTargetDetector
 from .camera import CameraManager
 from .circle_center_refiner import find_nearest_circle_center
 from .config import AppConfig, load_config, load_tool_offsets
+from .dataset_reference import estimate_roi_reference
 from .image_writer import ArtifactWriter
 from .logging_utils import get_logger
 from .models import (AnnotationCaptureRequest, MatchResult, SolveTargetRequest,
@@ -150,12 +151,49 @@ class VisionToolTcpSolver:
 
     def _handle_annotation(self, payload: Mapping[str, Any]) -> dict:
         request = AnnotationCaptureRequest.from_mapping(payload)
+        discard_s = float(payload.get("discardStaleFramesS", 0.0))
+        if discard_s > 0.0:
+            self.camera.discard_stale_frames(discard_s)
         frame = self.camera.capture_color()
         saved = self.artifacts.save_annotation(frame, request)
         return json_ready({
             "ok": True,
             "taskType": "capture_annotation_image_result",
             "taskId": request.task_id,
+            **saved,
+        })
+
+    def _handle_dataset_reference(self, payload: Mapping[str, Any]) -> dict:
+        """采集工具专用：一次3D帧锁定ROI物理中心，不触碰生产快照缓存。"""
+        request = AnnotationCaptureRequest.from_mapping(payload)
+        discard_s = float(payload.get("discardStaleFramesS", 0.0))
+        if discard_s > 0.0:
+            self.camera.discard_stale_frames(discard_s)
+        started = time.perf_counter()
+        frame = self.camera.capture_3d()
+        camera_model = self.camera.camera_model(frame)
+        try:
+            geometry = estimate_roi_reference(
+                frame, camera_model, payload.get("roiCornersPx"),
+                payload.get("geometry", {}))
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise TaskError("TARGET_GEOMETRY_FAILED", str(exc)) from exc
+        saved = self.artifacts.save_annotation(frame, request)
+        quality = dict(geometry["quality"])
+        log.info(
+            "数据采集三维参考: ROI=%s 中心相机系mm=%s 点数=%s "
+            "内点率=%.3f RMS=%.3fmm 耗时=%.1fms",
+            np.round(np.asarray(payload.get("roiCornersPx")), 1).tolist(),
+            np.round(geometry["targetCameraMm"], 3).tolist(),
+            quality.get("surroundingPointCount"),
+            float(quality.get("planeInlierRatio", float("nan"))),
+            float(quality.get("planeRmsMm", float("nan"))),
+            (time.perf_counter() - started) * 1000.0)
+        return json_ready({
+            "ok": True,
+            "taskType": "capture_dataset_reference_result",
+            "taskId": request.task_id,
+            **geometry,
             **saved,
         })
 
@@ -501,7 +539,7 @@ class VisionToolTcpSolver:
                   if plane_dist is not None else float("nan")),
                  (float(ray_dist) * 1000.0
                   if ray_dist is not None else float("nan")))
-        log.info("v3.5.3求解: 目标模式=%s code=%s 类别=%s 工具=%s "
+        log.info("v3.7.0求解: 目标模式=%s code=%s 类别=%s 工具=%s "
                  "光心参考距离=%.1fmm "
                  "工具偏移xyz=%s rpy=%s 配置sha256=%s 标准TCP=%s 最终TCP=%s",
                  selection_mode,
@@ -629,6 +667,8 @@ class VisionToolTcpSolver:
             }
         if task_type == "capture_annotation_image":
             return self._handle_annotation(payload)
+        if task_type == "capture_dataset_reference":
+            return self._handle_dataset_reference(payload)
         if task_type == "http_snapshot":
             return self._handle_http_snapshot(payload)
         if task_type == "solve_target_tcp":

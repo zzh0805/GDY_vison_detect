@@ -1,0 +1,95 @@
+# 只需修改本文件，然后运行：python run_collection.py
+runtime:
+  # 首次务必保持simulation；确认plan.json和模拟图片后再改为real。
+  mode: simulation
+  # real模式开始运动前是否要求输入START。
+  require_confirmation: true
+
+robot:
+  ip: "192.168.16.158"
+  sdk_path: ""
+  enable_motion: false
+  speed_mm_s: 30.0
+  accel_mm_s2: 100.0
+  settle_s: 0.8
+  timeout_s: 30.0
+
+service:
+  base_url: "http://127.0.0.1:48051"
+  timeout_s: 60.0
+  # 每次拍照前只消费原始积压帧，不做深度解码和点云重建。
+  discard_stale_frames_s: 0.5
+  # 保存到原视觉服务annotation_capture.root_directory下的子目录名。
+  dataset_name: "datas_get"
+
+dataset:
+  name: "workpiece_multiview"
+  # 相对于本文件所在目录；Windows和Ubuntu都可使用。
+  output_directory: "./output"
+  image_format: png
+
+reference:
+  image_width: 1920
+  image_height: 1080
+  # 初始拍照位彩色图中的工件区域：[左, 上, 右, 下]。
+  # 请把中心尽量标在需要始终对准的位置。
+  roi_xyxy_px: [740, 300, 1340, 800]
+  # point_cloud_plane：参考位自动采集一次对齐点云，用ROI外围安装平面锁定
+  # 真实三维目标点；不会读取或修改正常/snapshot缓存。
+  target_source: point_cloud_plane
+  # 仅在target_source=configured_depth或模拟参考接口时作为备用深度。
+  target_depth_mm: 500.0
+  geometry:
+    # 从ROI向外扩展后、排除ROI本体，用外围安装面做RANSAC拟合。
+    plane_expand_ratio: 0.70
+    exclude_roi_margin_ratio: 0.08
+    min_plane_points: 300
+    max_plane_sample_points: 20000
+    ransac_threshold_mm: 3.0
+    ransac_iterations: 600
+    min_inlier_ratio: 0.35
+    max_plane_rms_mm: 3.0
+  camera_calibration_file: "../calibration/chishine_192_168_16_122_calibration.yml"
+  handeye_file: "../calibration/handeye_result.json"
+  # 只供simulation使用；real模式会读取运行时当前JAKA TCP。
+  simulation_tcp_mm_rpy_deg: [680.0, -10.0, -263.0, 86.0, -48.0, 99.0]
+
+trajectory:
+  # 最少采样点；实际点数还会按下列最大步长自动加密。
+  samples_per_path: 8
+  max_position_step_mm: 12.0
+  max_look_angle_step_deg: 2.0
+  max_samples_per_path: 50
+  # 预测ROI的四角必须与图像边缘保持这个距离。
+  image_margin_px: 40
+  # 任何路线不满足ROI或运动范围限制时，在机械臂运动前终止整批采集。
+  fail_if_any_route_rejected: true
+  # false保证参考位置也重新执行look-at；最后会单独恢复启动时原TCP。
+  preserve_reference_pose: false
+  return_to_reference: true
+  max_tcp_translation_mm: 250.0
+  max_tcp_rotation_deg: 30.0
+  # 相机只能在安装面正面半球活动，避免绕到面板背面。
+  max_view_incidence_deg: 35.0
+  verification:
+    # 每次到位后读取真实TCP，校验实际位置、姿态和光轴误差后才拍照。
+    enabled: true
+    max_position_error_mm: 3.0
+    max_rotation_error_deg: 2.0
+    max_look_at_error_deg: 2.0
+    retry_count: 1
+
+  # 方位角：正值为参考画面右侧观察，负值为左侧。
+  # 俯仰角：正值为上侧观察，负值为下侧。
+  # 距离偏移：正值更远，负值更近。
+  views:
+    - {name: left,       azimuth_deg: -12, elevation_deg: 0,   distance_offset_mm: 0}
+    - {name: right,      azimuth_deg: 12,  elevation_deg: 0,   distance_offset_mm: 0}
+    - {name: upper,      azimuth_deg: 0,   elevation_deg: 10,  distance_offset_mm: 0}
+    - {name: lower,      azimuth_deg: 0,   elevation_deg: -10, distance_offset_mm: 0}
+    - {name: upper_left, azimuth_deg: -10, elevation_deg: 8,   distance_offset_mm: 20}
+    - {name: upper_right,azimuth_deg: 10,  elevation_deg: 8,   distance_offset_mm: 20}
+    - {name: lower_left, azimuth_deg: -10, elevation_deg: -8,  distance_offset_mm: 20}
+    - {name: lower_right,azimuth_deg: 10,  elevation_deg: -8,  distance_offset_mm: 20}
+    - {name: nearer,     azimuth_deg: 0,   elevation_deg: 0,   distance_offset_mm: -50}
+    - {name: farther,    azimuth_deg: 0,   elevation_deg: 0,   distance_offset_mm: 60}

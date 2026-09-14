@@ -66,6 +66,15 @@ HTTP输入和输出均为 JAKA 基座系 `mm + RPY rad`。算法内部及 YAML �
 
 请求里的拍照 TCP 必须对应实际采集帧。机械臂基座移动后，必须使用移动后重新读取的当前 TCP 和重新采集的图像，不能复用移动前的快照或 TCP。
 
+现场运动的预备距离不属于正式视觉解算配置，位于 `field_test/test_case.yaml`：
+
+```yaml
+jaka_test:
+  approach_distance_mm: 200.0
+```
+
+方向不在YAML中指定。`run_field_test` 通过 `/motion/get_tcp_pose` 取得当次平面法向在JAKA基座系下的单位向量，自动适应车辆正对、侧对或斜对柜体。工具标定和 `/get_tcp_pose` 正式响应不受该配置影响。
+
 ## v3光心参考、标准TCP与工具工作位
 
 当前 `tool` 模式的唯一实现顺序为：
@@ -87,6 +96,20 @@ v3拒绝加载旧字段 `camera_to_tool`，以免把旧综合参数误当成新�
 `workflow.yaml` 中不再允许内联 `tools`；它只通过 `tool_offsets.file` 指向独立文件。服务启动时先校验一次，之后每个 `/get_tcp_pose` 请求在目标选择和检测前重新读取一次，不使用文件内容缓存。
 
 运行中只允许热更新 `tool_offsets.yaml`。修改 `workflow.yaml` 中的相机、YOLO、手眼、全局修正、端口或其他参数后仍需重启服务。
+
+### YAML分步骤标定工具
+
+`tool/tool_calibration.yaml` 是独立的现场标定操作面板，不参与视觉服务启动。主要字段：
+
+- `operation.mode`：`1`从50mm标准位零标定，`2`从旧工作位纠正到新工作位，`3`按JAKA基座系增量微调；
+- `operation.step`：模式1/2依次使用1、2、3；模式3使用1、2；
+- `workpiece.class_name`：必须与 `tool_offsets.yaml` 中工件键一致；
+- `robot.ip/sdk_path`：只用于读取当前JAKA活动TCP；
+- `adjustment.xyz_mm/rpy_deg`：模式3的基座系位置和JAKA RPY分量增量；
+- `files.record_file`：自动记录每一步与最后结果；
+- `output.apply_to_tool_offsets`：默认 `false`；设为 `true` 时备份并更新正式工具偏移。
+
+详细操作见 [tool/README.md](tool/README.md)。该工具不会发送机械臂运动指令。
 
 每个工具必须包含：
 

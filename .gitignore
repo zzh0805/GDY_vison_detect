@@ -13,3 +13,5 @@ field_test/annotations/*
 !field_test/output/.gitkeep
 !field_test/images/.gitkeep
 !field_test/annotations/.gitkeep
+tool/tool_calibration_record.yaml
+tool/backups/

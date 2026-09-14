@@ -106,28 +106,30 @@ target_matching:
 
 ```text
 拍照位
-  → 基座X预备位（已经采用最终工作姿态）
-  → 只沿基座X直线进入最终工作TCP
-  → 只沿基座X原路退回预备位
+  → 按当次柜体法向反退的预备位（已经采用最终工作姿态）
+  → 沿柜体法向直线进入最终工作TCP
+  → 沿相反法向原路退回同一预备位
   → 返回拍照位
 ```
 
-接近距离和方向在 `field_test/test_case.yaml` 中设置：
+只需要在 `field_test/test_case.yaml` 设置接近距离：
 
 ```yaml
 jaka_test:
-  approach_offset_base_x_mm: -200.0
+  approach_distance_mm: 200.0
 ```
 
-预备位计算为 `预备X = 最终X + approach_offset_base_x_mm`，Y、Z和全部RPY与最终工作TCP完全相同。`-200` 表示从最终位基座X负方向200 mm处准备，再沿基座 `+X` 进入；如果现场需要沿 `-X` 进入则改为 `+200`。绝对值就是接近距离。
+进入方向来自当次解算的 `approachDirectionBase`，即安装平面法向转换到JAKA基座系后的单位向量。车正对柜体时它可能接近 `+X`，车侧对时可能接近 `+Y/-Y`，斜对时可以同时包含X/Y/Z分量，不需要人工选择轴。预备位置计算为 `最终位置 - approach_distance_mm × 进入方向`，全部RPY与最终工作TCP完全相同。
 
 也可以只覆盖本次运行，不修改YAML：
 
 ```bash
-bash run_field_test.sh --live --base-label 5 --code 9-8-1 --approach-x-mm -200
+bash run_field_test.sh --live --base-label 5 --code 9-8-1 --approach-mm 200
 ```
 
-脚本从工作位返回时严格反向经过同一个预备位。每段均使用JAKA直线运动；服务本身仍然只负责解算TCP，运动仅由现场测试脚本执行。
+旧参数 `--approach-x-mm` 仍可临时使用，但只取绝对值作为自动法向距离，不再表示固定基座X方向。脚本从工作位返回时严格反向经过同一个预备位，每段均使用JAKA直线运动。若平面法向缺失、不是有限数字或长度为0，运动接口返回422并禁止生成预备位。服务本身仍然只负责解算TCP，运动仅由现场测试脚本执行。
+
+自动法向只能规划最后一段接近和退出直线，不负责拍照位到预备位之间的全局避障。车辆改变停靠朝向后，首次低速验证必须保持 `work_jaka: false`，检查输出的方向单位向量、预备TCP、工作空间和障碍物；确认安全后才启用运动。拍照开始后车辆必须保持锁定和静止。
 
 对于零偏移类别，`result.json` 中应满足 `targetTcpMmRpyDeg == cameraReference.standardTcpMmRpyDeg`。按钮类别则应在标准TCP之后叠加迁移后的 `standard_to_tool`。
 

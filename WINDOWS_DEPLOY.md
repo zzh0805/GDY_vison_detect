@@ -99,7 +99,16 @@ TCP解算的字段、坐标单位和 `live` 模式见 [INTERFACE.md](INTERFACE.m
 
 ## 6. 工具偏移热更新
 
-服务运行时直接编辑并保存 `config/tool_offsets.yaml`。下一次 `/get_tcp_pose` 会读取新的工具偏移、`target_selection.use_yolo` 和每个工件的 `code`，无需重启服务。无YOLO模式由请求 `code` 动态选择工件。可以在 `service.log` 中核对请求code、对应工件、工具偏移和配置SHA-256。Windows可直接运行 `calibrate_tool_offset.py`；`run_tool_calibration.sh` 是Ubuntu Bash包装脚本。
+服务运行时直接编辑并保存 `config/tool_offsets.yaml`。下一次 `/get_tcp_pose` 会读取新的工具偏移、`target_selection.use_yolo` 和每个工件的 `code`，无需重启服务。无YOLO模式由请求 `code` 动态选择工件。可以在 `service.log` 中核对请求code、对应工件、工具偏移和配置SHA-256。
+
+新的三模式分步骤标定只需编辑 `tool/tool_calibration.yaml`，然后运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tool\run_tool_calibration.ps1 `
+  -Python ".\.venv\Scripts\python.exe"
+```
+
+完整流程见 [tool/README.md](tool/README.md)。根目录 `calibrate_tool_offset.py` 和 `run_tool_calibration.sh` 继续作为旧手动参数方式保留。
 
 只有工具文件支持热更新。修改 `workflow.yaml`、模型、相机标定或手眼标定后必须重启服务。工具文件语法或数值无效时，本次请求返回500且不会沿用旧参数；修复后直接重试。
 
@@ -131,7 +140,7 @@ powershell -ExecutionPolicy Bypass -File .\run_field_test.ps1 `
 
 只有确认返回位姿、安全方向、速度和机械臂工作空间后，才可启用 `work_jaka: true`。完整流程见 [FIELD_TEST.md](FIELD_TEST.md)。
 
-启用运动后，脚本会先到最终TCP沿JAKA基座X偏移的预备位，在该处摆好最终姿态，再仅沿基座X进入；完成后沿相同预备位返回拍照位。默认偏移在 `field_test/test_case.yaml` 中为 `approach_offset_base_x_mm: -200.0`，也可用 `--approach-x-mm` 临时覆盖。
+启用运动后，脚本会使用当次点云拟合的柜体法向，在最终TCP外生成预备位并摆好最终姿态，再沿该法向直线进入；完成后沿同一直线退回预备位并返回拍照位。默认距离在 `field_test/test_case.yaml` 中为 `approach_distance_mm: 200.0`，也可用 `--approach-mm 200` 临时覆盖。车辆改变停靠朝向后应先保持 `work_jaka: false` 核对方向与预备位。
 
 ## 8. 无硬件测试与排障
 

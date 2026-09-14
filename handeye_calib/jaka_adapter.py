@@ -329,6 +329,37 @@ class JAKARobotAdapter:
         pose = self.get_tcp_pose()
         return hm.homogeneous(hm._rotvec_to_mat(pose[3:]), pose[:3])
 
+    def get_pose_mm_rpy_deg(self) -> np.ndarray:
+        """数据采集使用的JAKA原生TCP表达；不改变通用get_tcp_pose。"""
+        pose = self._actual_jaka_pose().copy()
+        pose[3:] = np.degrees(pose[3:])
+        return pose
+
+    def move_to_mm_rpy_deg(self, target: np.ndarray, name: str = "") -> None:
+        """按连续化后的JAKA RPY直接运动，避免矩阵往返再次折回±180°。"""
+        if not self.enable_motion:
+            raise RuntimeError("当前 JAKA 适配器未启用运动控制")
+        if not self.is_connected():
+            raise RuntimeError("JAKA 机器人未连接")
+        target = np.asarray(target, dtype=np.float64).reshape(6).copy()
+        if not np.isfinite(target).all():
+            raise ValueError("JAKA目标TCP包含NaN/Inf")
+        target[3:] = np.radians(target[3:])
+        jaka_target = tuple(float(value) for value in target)
+        speed_mm_s = self.speed * 1000.0
+        accel_mm_s2 = self.accel * 1000.0
+        if hasattr(self.robot, "linear_move_extend"):
+            result = self.robot.linear_move_extend(
+                jaka_target, 0, True, speed_mm_s, accel_mm_s2, 0.1)
+        else:
+            result = self.robot.linear_move(jaka_target, 0, True, speed_mm_s)
+        code, _ = _split_result(result)
+        if code != 0:
+            raise RuntimeError(f"{name} JAKA linear_move 失败: code={code}")
+        if self.settle > 0:
+            import time
+            time.sleep(self.settle)
+
     def move_linear(self, target: np.ndarray, name: str = "") -> None:
         if not self.enable_motion:
             raise RuntimeError("当前 JAKA 适配器未启用运动控制")

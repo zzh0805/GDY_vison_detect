@@ -1,0 +1,4 @@
+output/
+.simulation_service_images/
+__pycache__/
+tests/__pycache__/

@@ -12,6 +12,20 @@
 
 ## 当前版本
 
+`v3.7.0`（2026-09-14）更新内容：
+
+- 现场运动不再固定沿JAKA基座X进入，而是读取当次安装平面法向在基座系中的 `approachDirectionBase`；
+- 车正对、侧对或斜对柜体时，统一按法向反退可调距离生成预备TCP，再沿同一直线进入和退出；
+- 预备TCP保持最终工作位的全部RPY，工具标定、最终TCP坐标链以及正式 `/get_tcp_pose` 的输入输出完全不变；
+- 新增隔离的 `/motion/get_tcp_pose` 供现场运动脚本读取方向，方向无效时拒绝运动；旧 `--approach-x-mm` 仅作为距离兼容入口。
+
+`v3.6.0`（2026-09-12）更新内容：
+
+- 新增 `tool/tool_calibration.yaml`，通过 `mode + step` 分步骤记录JAKA当前TCP，不再手输长位姿参数；
+- 支持从50mm标准位从零标定、旧工作位到新工作位纠正、JAKA基座系XYZ/RPY微调三种模式；
+- 每一步和最终结果自动保存到独立记录YAML，可选择只输出，或备份后自动更新正式工具偏移；
+- 标定脚本只读取机械臂位姿，不发送运动指令，并提供Ubuntu Bash和Windows PowerShell入口。
+
 `v3.5.3`（2026-09-11）更新内容：
 
 - 颜色继续用于从相邻目标中筛选正确的红、绿、黑工件；
@@ -77,6 +91,7 @@
 - 使用目标外围安装平面的点云拟合中心和法向，避免依赖目标自身深度；
 - 根据拍照TCP、手眼标定、50 mm光心参考位和全局修正计算标准活动TCP；
 - 按目标类别叠加工具固定偏移，返回JAKA基座系最终活动TCP；
+- 现场运动按当次柜体法向自动生成预备位，适应移动车底座正对、侧对及斜对柜体；
 - 支持工具偏移热更新、运行报告、检测叠加图、现场LabelMe联调和无硬件模拟测试。
 
 ## 目录与文件
@@ -91,6 +106,8 @@
 | `calibration/` | 相机标定与手眼标定文件 |
 | `models/xuncao.pt` | YOLO模型 |
 | `field_test/` | 快照、LabelMe标注、坐标解算、JAKA只读/运动联调脚本 |
+| `tool/` | YAML驱动的三模式工具标定、记录、备份及跨平台运行入口 |
+| `datas_get/` | 独立多视角采集：点云锁定ROI三维中心、自动look-at姿态和到位校验 |
 | `calibrate_tool_offset.py` | 根据标准TCP与工具示教TCP反算 `standard_to_tool` |
 | `run_tool_calibration.sh` | Ubuntu可编辑参数式工具标定、验证和微调入口 |
 | `migrate_legacy_tool_offset.py` | 将旧版工具标定迁移到统一坐标链 |
@@ -188,13 +205,13 @@ target_matching:
 
 如果文件存在YAML语法错误、缺少类别、数组不是3个有限数字或仍使用v1字段 `camera_to_tool`，本次请求会失败并且不会沿用旧偏移。修正文件后直接重试即可，不需要重启服务。`service.log` 和保存的 `result.json` 会记录本次实际使用的数值及文件SHA-256。
 
-Ubuntu工具标定不需要手写长命令。编辑 [run_tool_calibration.sh](run_tool_calibration.sh) 顶部“用户参数区”，然后运行：
+推荐使用新的YAML分步骤标定。编辑 [tool/tool_calibration.yaml](tool/tool_calibration.yaml) 中的 `mode`、`step` 和工件信息，然后每完成一步运行：
 
 ```bash
-bash run_tool_calibration.sh
+bash tool/run_tool_calibration.sh
 ```
 
-脚本只计算并输出可粘贴的YAML，不连接相机、不控制机械臂，也不会自动覆盖配置文件。
+模式1依次执行step 1/2/3；模式2依次执行step 1/2/3；模式3执行step 1后填写微调量，再执行step 2。脚本会连接JAKA读取当前活动TCP，但不会控制机械臂运动。完整步骤、数学含义、记录文件和自动应用开关见 [tool/README.md](tool/README.md)。根目录旧 `run_tool_calibration.sh` 仍保留，兼容原来的手动参数方式。
 
 ## Ubuntu 快速启动
 

@@ -23,9 +23,20 @@ class _RecordingSolver:
         self.requests.append((payload, timeout_s))
         if payload["taskType"] == "http_snapshot":
             return {"ok": True, "imagePath": "/tmp/20260828120000.jpg"}
+        if payload["taskType"] == "capture_annotation_image":
+            return {"ok": True, "imagePath": "/tmp/color.png"}
+        if payload["taskType"] == "capture_dataset_reference":
+            return {
+                "ok": True, "imagePath": "/tmp/reference.png",
+                "targetCameraMm": [1, 2, 500],
+                "roiCornersCameraMm": [[0, 0, 500]] * 4,
+                "planeNormalCamera": [0, 0, -1],
+                "quality": {"planeRmsMm": 0.2},
+            }
         return {
             "ok": True,
             "targetTcpMmRpyDeg": [1, 2, 3, 90, -45, 180],
+            "geometry": {"approachDirectionBase": [0, 2, 0]},
         }
 
 
@@ -53,6 +64,72 @@ class HttpProtocolTests(unittest.TestCase):
     def test_snapshot_response_contains_only_code_and_path(self):
         result = VisionHttpProtocol(_RecordingSolver()).snapshot()
         self.assertEqual(result, {
+            "code": 200, "path": "/tmp/20260828120000.jpg"})
+
+    def test_motion_result_adds_normalized_approach_without_changing_public(self):
+        solver = _RecordingSolver()
+        protocol = VisionHttpProtocol(solver)
+        payload = {
+            "pos": [10, 20, 30, 0, 0, 0],
+            "target": {"x1": 100, "y1": 200, "x2": 300, "y2": 400},
+        }
+        public = protocol.get_tcp_pose(payload)
+        self.assertEqual(set(public), {"code", "pos"})
+
+        motion = protocol.get_tcp_pose_with_approach(payload)
+        self.assertEqual(set(motion), {
+            "code", "pos", "approachDirectionBase",
+            "approachDirectionSource",
+        })
+        self.assertEqual(motion["pos"], public["pos"])
+        self.assertTrue(np.allclose(
+            motion["approachDirectionBase"], [0.0, 1.0, 0.0]))
+        self.assertEqual(
+            motion["approachDirectionSource"], "fitted_panel_normal")
+
+    def test_motion_result_rejects_missing_direction(self):
+        class _MissingDirectionSolver(_RecordingSolver):
+            def handle_task(self, payload, timeout_s=None):
+                result = super().handle_task(payload, timeout_s)
+                if payload["taskType"] == "solve_target_tcp":
+                    result.pop("geometry", None)
+                return result
+
+        result = VisionHttpProtocol(
+            _MissingDirectionSolver()).get_tcp_pose_with_approach({
+                "pos": [10, 20, 30, 0, 0, 0],
+                "target": {
+                    "x1": 100, "y1": 200, "x2": 300, "y2": 400,
+                },
+            })
+        self.assertEqual(result["code"], 422)
+        self.assertIn("安全进入方向", result["status"])
+
+    def test_capture_color_is_additive_and_uses_annotation_task(self):
+        solver = _RecordingSolver()
+        result = VisionHttpProtocol(solver).capture_color({
+            "dataset": "dataset_a", "fileName": "right_01.png"})
+        self.assertEqual(result, {"code": 200, "path": "/tmp/color.png"})
+        task = solver.requests[0][0]
+        self.assertEqual(task["taskType"], "capture_annotation_image")
+        self.assertEqual(task["datasetName"], "dataset_a")
+        self.assertEqual(task["fileName"], "right_01.png")
+        self.assertEqual(task["discardStaleFramesS"], 0.0)
+
+    def test_dataset_reference_is_additive_and_does_not_change_old_responses(self):
+        solver = _RecordingSolver()
+        result = VisionHttpProtocol(solver).capture_dataset_reference({
+            "dataset": "set_a", "fileName": "reference.png",
+            "roi": {"x1": 100, "y1": 200, "x2": 300, "y2": 400},
+            "geometry": {"ransac_threshold_mm": 3.0},
+        })
+        self.assertEqual(result["code"], 200)
+        self.assertEqual(result["targetCameraMm"], [1, 2, 500])
+        task = solver.requests[0][0]
+        self.assertEqual(task["taskType"], "capture_dataset_reference")
+        self.assertEqual(task["roiCornersPx"], [
+            [100, 200], [300, 200], [300, 400], [100, 400]])
+        self.assertEqual(VisionHttpProtocol(_RecordingSolver()).snapshot(), {
             "code": 200, "path": "/tmp/20260828120000.jpg"})
 
     def test_empty_workpiece_code_is_rejected(self):

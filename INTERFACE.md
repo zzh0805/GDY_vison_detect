@@ -78,6 +78,23 @@ curl -X POST http://127.0.0.1:48051/snapshot
 
 每次调用此接口都会重新读取 `config/tool_offsets.yaml`。修改并保存工具偏移后，下一次调用直接生效，不需要重启服务或重新连接相机。
 
+## `POST /motion/get_tcp_pose`（现场运动脚本专用）
+
+请求字段、单位、实时/缓存行为与 `/get_tcp_pose` 完全相同，但成功响应额外提供当次安装平面法向转换到JAKA基座系后的进入方向：
+
+```json
+{
+  "code": 200,
+  "pos": [689.25, -506.85, 535.67, 1.5722, -0.8269, 1.5523],
+  "approachDirectionBase": [0.012, 0.999, -0.036],
+  "approachDirectionSource": "fitted_panel_normal"
+}
+```
+
+`approachDirectionBase` 是无单位的归一化向量，从外部预备位指向柜体工作位。现场脚本用 `预备位置 = 最终位置 - 距离 × 方向` 生成预备TCP，RPY保持最终工作位不变。该接口只为本项目运动脚本增加信息；正式后台继续使用 `/get_tcp_pose`，其成功响应仍严格只有 `code` 和 `pos`。
+
+方向缺失、包含NaN/Inf或长度为0时返回422，不会回退为固定基座X方向。
+
 ## 两步流程约束
 
 调用 `/snapshot` 后再进行框选和 `/get_tcp_pose` 时，必须保持机械臂、相机和目标不动，并使用拍摄该快照时读取到的 TCP。成功解算后缓存会被释放；下一轮重新调用 `/snapshot`。

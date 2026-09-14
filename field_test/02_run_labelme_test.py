@@ -9,8 +9,9 @@ from pathlib import Path
 
 import numpy as np
 
-from common import (base_x_approach_pose_mm_rpy_deg, create_http_client,
-                    create_jaka, jaka_deg_to_unified, load_test_case,
+from common import (create_http_client, create_jaka,
+                    directional_approach_pose_mm_rpy_deg,
+                    jaka_deg_to_unified, load_test_case,
                     read_jaka_pose_mm_rpy_deg, read_labelme_corners,
                     resolve_from)
 
@@ -32,9 +33,13 @@ def main() -> int:
         help=("无YOLO模式的工件编码；覆盖test_case.yaml中的case.code，"
               "例如9-8-1"))
     parser.add_argument(
+        "--approach-mm", type=float, default=None,
+        help=("覆盖jaka_test.approach_distance_mm；沿当次柜体法向反退的"
+              "预备距离，默认200mm"))
+    parser.add_argument(
         "--approach-x-mm", type=float, default=None,
-        help=("覆盖jaka_test.approach_offset_base_x_mm；预备位X="
-              "最终X+该值，负值表示随后沿基座+X进入"))
+        help=("兼容旧命令；只取绝对值作为自动法向预备距离，"
+              "不再固定沿基座X进入"))
     args = parser.parse_args()
     case_path, data = load_test_case(args.case)
     case = dict(data.get("case") or {})
@@ -65,12 +70,22 @@ def main() -> int:
 
     start_jaka = bool(jaka.get("start_jaka", False))
     work_jaka = bool(jaka.get("work_jaka", False))
-    approach_offset_x_mm = float(
-        args.approach_x_mm
-        if args.approach_x_mm is not None
-        else jaka.get("approach_offset_base_x_mm", -200.0))
-    if not np.isfinite(approach_offset_x_mm):
-        raise ValueError("approach_offset_base_x_mm必须是有限数字")
+    if args.approach_mm is not None and args.approach_x_mm is not None:
+        raise ValueError("--approach-mm和兼容参数--approach-x-mm不能同时使用")
+    if args.approach_mm is not None:
+        approach_distance_mm = float(args.approach_mm)
+    elif args.approach_x_mm is not None:
+        approach_distance_mm = abs(float(args.approach_x_mm))
+        print("提示：--approach-x-mm已改为兼容参数，本次只取其绝对值作为法向距离")
+    elif "approach_distance_mm" in jaka:
+        approach_distance_mm = float(jaka["approach_distance_mm"])
+    else:
+        # 兼容v3.4.0旧配置；方向不再采用基座X，只保留原距离大小。
+        approach_distance_mm = abs(float(
+            jaka.get("approach_offset_base_x_mm", -200.0)))
+    if not np.isfinite(approach_distance_mm) or not (
+            0.0 <= approach_distance_mm <= 1000.0):
+        raise ValueError("approach_distance_mm必须是0到1000之间的有限数字")
     robot = None
     try:
         if start_jaka or work_jaka:
@@ -92,7 +107,7 @@ def main() -> int:
         x2, y2 = np.max(corners, axis=0)
         if workpiece_code:
             print(f"本次请求工件code={workpiece_code}")
-        result = create_http_client(data).get_tcp_pose(
+        result = create_http_client(data).get_tcp_pose_with_approach(
             capture_tcp_rad.tolist(), x1, y1, x2, y2,
             base=base_rect, live=bool(args.live),
             code=(workpiece_code or None))
@@ -104,9 +119,14 @@ def main() -> int:
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         print("测试结果(原始响应,mm+rad):", output_path)
         if int(result.get("code", 0)) != 200:
-            raise RuntimeError(f"POST /get_tcp_pose失败: {result}")
-        if set(result) != {"code", "pos"}:
-            raise RuntimeError(f"成功响应字段不符合最新协议: {sorted(result)}")
+            raise RuntimeError(f"POST /motion/get_tcp_pose失败: {result}")
+        expected_fields = {
+            "code", "pos", "approachDirectionBase",
+            "approachDirectionSource",
+        }
+        if set(result) != expected_fields:
+            raise RuntimeError(
+                f"运动解算响应字段不符合协议: {sorted(result)}")
 
         # 服务返回 pos 为 mm + RPY 弧度；JAKA 示教器用 mm + RPY 度。
         # 打印可直接输入示教器的坐标（拷贝这行即可）。
@@ -120,31 +140,32 @@ def main() -> int:
               % tuple(pos_deg))
         print("====================================================")
 
-        approach_tcp_deg = base_x_approach_pose_mm_rpy_deg(
-            pos_deg, approach_offset_x_mm)
-        enter_direction = "+X" if approach_offset_x_mm < 0.0 else "-X"
-        if abs(approach_offset_x_mm) < 1e-9:
-            enter_direction = "X不移动"
-        print("\n==== 基座X预备TCP（姿态与最终工作位相同） ====")
+        enter_direction = np.asarray(
+            result["approachDirectionBase"], dtype=np.float64).reshape(3)
+        approach_tcp_deg = directional_approach_pose_mm_rpy_deg(
+            pos_deg, enter_direction, approach_distance_mm)
+        enter_direction /= np.linalg.norm(enter_direction)
+        print("\n==== 柜体法向自适应预备TCP（姿态与最终工作位相同） ====")
         print("  [%.4f, %.4f, %.4f, %.4f, %.4f, %.4f]"
               % tuple(approach_tcp_deg))
-        print("  X偏移=%+.1f mm，进入方向=%s"
-              % (approach_offset_x_mm, enter_direction))
-        print("================================================")
+        print("  进入方向(JAKA基座单位向量)=[%.6f, %.6f, %.6f]"
+              % tuple(enter_direction))
+        print("  沿该方向反退预备距离=%.1f mm" % approach_distance_mm)
+        print("========================================================")
 
         if work_jaka:
             print(
-                "work_jaka=true：先移动到基座X预备位 "
-                f"(X偏移={approach_offset_x_mm:+.1f}mm)，并摆好最终姿态……")
+                "work_jaka=true：先移动到柜体法向预备位 "
+                f"(反退距离={approach_distance_mm:.1f}mm)，并摆好最终姿态……")
             robot.move_linear(
                 jaka_deg_to_unified(approach_tcp_deg),
                 name="field_test_work_approach_pose")
-            print("正在仅沿JAKA基座X方向直线进入工作TCP……")
+            print("正在沿当次柜体法向直线进入工作TCP……")
             robot.move_linear(
                 jaka_deg_to_unified(pos_deg),
                 name="field_test_work_pose")
             print("机器人已到达工作TCP")
-            print("正在沿原路仅沿基座X退回预备位……")
+            print("正在沿相反法向原路退回同一预备位……")
             robot.move_linear(
                 jaka_deg_to_unified(approach_tcp_deg),
                 name="field_test_work_retreat_pose")

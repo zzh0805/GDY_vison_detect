@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""机械臂末端视觉HTTP服务，仅提供/snapshot和/get_tcp_pose。"""
+"""机械臂末端视觉HTTP服务，提供拍照和TCP解算接口。"""
 from __future__ import annotations
 
 import json
@@ -96,6 +96,44 @@ class VisionHttpServer:
                         log.info("HTTP /snapshot %s 耗时=%.1fms code=%s",
                                  client, (time.perf_counter() - started) * 1000.0,
                                  result.get("code"))
+                        return
+                    if path == "/capture_color":
+                        result = protocol.capture_color(self._json_body())
+                        self._send_json(result)
+                        log.info("HTTP /capture_color %s 耗时=%.1fms code=%s",
+                                 client,
+                                 (time.perf_counter() - started) * 1000.0,
+                                 result.get("code"))
+                        return
+                    if path == "/datas_get/reference":
+                        result = protocol.capture_dataset_reference(
+                            self._json_body())
+                        self._send_json(result)
+                        log.info(
+                            "HTTP /datas_get/reference %s 耗时=%.1fms code=%s",
+                            client, (time.perf_counter() - started) * 1000.0,
+                            result.get("code"))
+                        return
+                    if path == "/motion/get_tcp_pose":
+                        result = protocol.get_tcp_pose_with_approach(
+                            self._json_body())
+                        self._send_json(result)
+                        code = result.get("code")
+                        if code == 200:
+                            log.info(
+                                "HTTP /motion/get_tcp_pose %s 耗时=%.1fms "
+                                "code=200 pos=%s direction=%s",
+                                client,
+                                (time.perf_counter() - started) * 1000.0,
+                                _round_pos(result.get("pos")),
+                                result.get("approachDirectionBase"))
+                        else:
+                            log.error(
+                                "HTTP /motion/get_tcp_pose %s 耗时=%.1fms "
+                                "code=%s status=%s",
+                                client,
+                                (time.perf_counter() - started) * 1000.0,
+                                code, result.get("status"))
                         return
                     if path == "/get_tcp_pose":
                         result = protocol.get_tcp_pose(self._json_body())

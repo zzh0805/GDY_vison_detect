@@ -74,13 +74,13 @@ curl -X POST http://127.0.0.1:48051/snapshot
 
 服务运行期间修改 `config/tool_offsets.yaml` 后无需重启。工具偏移、`use_yolo` 和 `tools` 下的 `code` 映射都在下一次 `/get_tcp_pose` 自动生效；若文件格式错误，该请求返回500并拒绝输出旧偏移结果，修正后直接重试。
 
-在Ubuntu上标定或微调工具时，修改 `run_tool_calibration.sh` 顶部用户参数区并运行：
+在Ubuntu上标定或微调工具时，优先编辑 `tool/tool_calibration.yaml`，按当前模式和步骤运行：
 
 ```bash
-bash run_tool_calibration.sh
+bash tool/run_tool_calibration.sh
 ```
 
-该脚本不访问相机或机械臂，仅包装 `calibrate_tool_offset.py` 完成数学计算。
+脚本只登录JAKA并读取当前活动TCP，不发送运动命令。模式1/2依次执行step 1、2、3；模式3记录step 1后填写基座系微调量，再执行step 2。每一步及最终结果保存在 `tool/tool_calibration_record.yaml`；完整说明见 [tool/README.md](tool/README.md)。根目录旧脚本仍保留供手工输入参数时兼容使用。
 
 ## 5. 后台启动
 

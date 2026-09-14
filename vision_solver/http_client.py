@@ -36,17 +36,34 @@ class VisionHttpClient:
     def snapshot(self) -> dict:
         return self._post("/snapshot")
 
-    def get_tcp_pose(self, pos_mm_rpy_rad: Sequence[float],
-                     x1: float, y1: float, x2: float, y2: float,
-                     *, base: Any = None, live: bool = False,
-                     code: str | None = None) -> dict:
-        """解算目标TCP。
-        - target 矩形由 x1,y1,x2,y2 给出；
-        - base：基座面板矩形 dict {"x1","y1","x2","y2"}（可选）。
-          提供时目标中心深度以 base 面板平面为准（每次检测以基座深度为准）；
-        - live=True时实时采集当前帧（拍照+检测+解算一体）。
-        - code：关闭YOLO时用于选择tools工件的外部业务编码。
-        """
+    def capture_color(self, dataset: str = "datas_get",
+                      file_name: str = "",
+                      discard_stale_frames_s: float = 0.0) -> dict:
+        return self._post("/capture_color", {
+            "dataset": str(dataset),
+            "fileName": str(file_name),
+            "discardStaleFramesS": float(discard_stale_frames_s),
+        })
+
+    def capture_dataset_reference(
+            self, dataset: str, file_name: str, roi_xyxy_px: Sequence[float],
+            *, discard_stale_frames_s: float = 0.0,
+            geometry: Any = None) -> dict:
+        """数据采集专用三维参考；不影响正常/snapshot缓存。"""
+        x1, y1, x2, y2 = (float(value) for value in roi_xyxy_px)
+        return self._post("/datas_get/reference", {
+            "dataset": str(dataset),
+            "fileName": str(file_name),
+            "roi": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+            "discardStaleFramesS": float(discard_stale_frames_s),
+            "geometry": dict(geometry or {}),
+        })
+
+    @staticmethod
+    def _tcp_pose_payload(pos_mm_rpy_rad: Sequence[float],
+                          x1: float, y1: float, x2: float, y2: float,
+                          *, base: Any = None, live: bool = False,
+                          code: str | None = None) -> dict:
         payload = {
             "pos": list(pos_mm_rpy_rad),
             "target": {
@@ -63,4 +80,31 @@ class VisionHttpClient:
             payload["live"] = True
         if code is not None:
             payload["code"] = str(code)
+        return payload
+
+    def get_tcp_pose(self, pos_mm_rpy_rad: Sequence[float],
+                     x1: float, y1: float, x2: float, y2: float,
+                     *, base: Any = None, live: bool = False,
+                     code: str | None = None) -> dict:
+        """通过正式后台接口解算目标TCP。
+        - target 矩形由 x1,y1,x2,y2 给出；
+        - base：基座面板矩形 dict {"x1","y1","x2","y2"}（可选）。
+          提供时目标中心深度以 base 面板平面为准（每次检测以基座深度为准）；
+        - live=True时实时采集当前帧（拍照+检测+解算一体）。
+        - code：关闭YOLO时用于选择tools工件的外部业务编码。
+        """
+        payload = self._tcp_pose_payload(
+            pos_mm_rpy_rad, x1, y1, x2, y2,
+            base=base, live=live, code=code)
         return self._post("/get_tcp_pose", payload)
+
+    def get_tcp_pose_with_approach(
+            self, pos_mm_rpy_rad: Sequence[float],
+            x1: float, y1: float, x2: float, y2: float,
+            *, base: Any = None, live: bool = False,
+            code: str | None = None) -> dict:
+        """现场运动专用：一次解算同时取得最终TCP和柜体法向方向。"""
+        payload = self._tcp_pose_payload(
+            pos_mm_rpy_rad, x1, y1, x2, y2,
+            base=base, live=live, code=code)
+        return self._post("/motion/get_tcp_pose", payload)

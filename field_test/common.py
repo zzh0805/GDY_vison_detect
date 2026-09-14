@@ -97,6 +97,33 @@ def base_x_approach_pose_mm_rpy_deg(
     return approach
 
 
+def directional_approach_pose_mm_rpy_deg(
+        target_pose_mm_rpy_deg: Any,
+        approach_direction_base: Any,
+        approach_distance_mm: float) -> np.ndarray:
+    """沿当次柜体法向的反方向生成预备TCP。
+
+    approach_direction_base是在JAKA基座系中从相机/预备位指向柜体的
+    单位方向。预备位与最终位姿态完全相同，只把位置沿该方向反退指定距离。
+    """
+    target = np.asarray(
+        target_pose_mm_rpy_deg, dtype=np.float64).reshape(6)
+    direction = np.asarray(
+        approach_direction_base, dtype=np.float64).reshape(3)
+    distance = float(approach_distance_mm)
+    norm = float(np.linalg.norm(direction))
+    if not np.isfinite(target).all():
+        raise ValueError("工作TCP必须是6个有限数字")
+    if not np.isfinite(direction).all() or not np.isfinite(norm) or norm < 1e-9:
+        raise ValueError("进入方向必须是3个有限数字且长度不能为0")
+    if not np.isfinite(distance) or distance < 0.0:
+        raise ValueError("预备距离必须是非负有限数字")
+    direction /= norm
+    approach = target.copy()
+    approach[:3] -= distance * direction
+    return approach
+
+
 def read_labelme_corners(path: Path, label: str,
                          shape_index: int = 0) -> np.ndarray:
     # 兼容 Windows 工具保存的 UTF-16/UTF-8 BOM 标注文件：

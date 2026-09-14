@@ -86,9 +86,15 @@ tcp_correction
     → 所有工具共用的标准活动TCP
 standard_to_tool
     → 最终工具工作TCP
+安装平面法向转换到基座系
+    → approachDirectionBase
+最终工具工作TCP - 预备距离 × approachDirectionBase
+    → 现场运动预备TCP
 ```
 
-`tcp_correction`只对逆手眼活动TCP施加一次，工具偏移位于其后。零 `standard_to_tool` 表示输出标准活动TCP。算法实现位于 `vision_solver/pose_solver.py`。
+`tcp_correction`只对逆手眼活动TCP施加一次，工具偏移位于其后。零 `standard_to_tool` 表示输出标准活动TCP。算法实现位于 `vision_solver/pose_solver.py`。自动进入方向只用于现场运动脚本生成预备位，不参与最终工具TCP计算，因此不会改变现有工具标定。
+
+正式 `/get_tcp_pose` 继续只返回 `code + pos`。隔离的 `/motion/get_tcp_pose` 复用同一次完整解算并额外返回归一化 `approachDirectionBase`，供 `field_test/02_run_labelme_test.py` 使用；方向无效时直接拒绝运动，不回退到固定轴。JAKA最后一段采用直线运动：预备位到工作位，再反向回到同一预备位。
 
 ## 工具配置热加载边界
 
@@ -111,6 +117,8 @@ standard_to_tool
 | `vision_solver/circle_center_refiner.py` | 无YOLO模式下用红绿黑颜色筛选工件并求最大有效外圆圆心 |
 | `vision_solver/pose_solver.py` | 光心参考、逆手眼、标准TCP、工具偏移和最终TCP |
 | `config/tool_offsets.yaml` | 可在服务运行中修改的工具工作位偏移 |
+| `tool/tool_calibration_workflow.py` | YAML分步骤记录JAKA TCP并完成三种工具标定数学 |
+| `tool/tool_calibration.yaml` | 现场只需修改的标定模式、步骤、工件和微调参数 |
 | `calibrate_tool_offset.py` | 基于标准TCP标定工具偏移 |
 | `migrate_legacy_tool_offset.py` | 将v1工具参数/示教结果迁移到v2 |
 | `vision_solver/image_writer.py` | 运行时快照、报告和调试图写入 |

@@ -1,0 +1,45 @@
+# 工具工作位标定操作面板。现场通常只修改本文件，然后反复运行脚本。
+version: 1
+
+operation:
+  # mode=1：从零标定。step 1记录相机光心距目标平面50mm时的标准TCP；
+  #         step 2记录工具最终工作TCP；step 3计算工具偏移。
+  # mode=2：纠正已有工件。step 1记录旧工作TCP；step 2记录调整后的新工作TCP；
+  #         step 3读取现有偏移并计算新偏移。
+  # mode=3：基座系微调。step 1记录当前工作TCP；填写adjustment后把step改为2计算。
+  mode: 1
+  step: 1
+
+workpiece:
+  # 必须与config/tool_offsets.yaml中tools下的工件名称一致。
+  class_name: greenbtn
+  tool_id: tool_green_button
+  # 无YOLO模式使用的外部code；新建工件时需要填写。
+  code: "9-8-1"
+  # 可填写auto、red、green或black。
+  target_color: green
+
+robot:
+  # 记录步骤只登录并读取当前活动TCP，不会控制机械臂运动。
+  ip: 192.168.16.158
+  sdk_path: ""
+  timeout_s: 30.0
+
+adjustment:
+  # 仅mode=3使用，单位为JAKA基座坐标系mm。
+  # 示例：X+2mm写[2, 0, 0]；Y-2mm写[0, -2, 0]。
+  xyz_mm: [0.0, 0.0, 0.0]
+  # JAKA RPY分量增量，单位为度；只建议做小角度微调。
+  rpy_deg: [0.0, 0.0, 0.0]
+
+files:
+  # 自动记录每一步TCP及最后结果。无需手工创建，也不要提交到Git。
+  record_file: ./tool_calibration_record.yaml
+  # 模式2/3从此文件读取当前工件偏移。
+  tool_offsets_file: ../config/tool_offsets.yaml
+
+output:
+  # false：只输出并记录结果，不修改正式工具配置（推荐先用此设置核对）。
+  # true：计算步骤会自动更新tool_offsets_file；更新前自动备份。
+  apply_to_tool_offsets: false
+  backup_directory: ./backups
