@@ -16,11 +16,12 @@
 | `pose.standoff_mm` | `50.0` | 光心参考位到目标平面的距离 |
 | `pose.pipeline_version` | `2` | 强制使用v2统一坐标链，防止误载v1配置 |
 | `tool_offsets.file` | `./tool_offsets.yaml` | 每次目标TCP解算重新读取的工具标定文件 |
-| `target_selection.use_yolo` | `true` | `true`使用YOLO；`false`使用请求框附近最大有效外圆圆心 |
+| `target_selection.use_yolo` | `false` | `true`使用YOLO；`false`使用code选择工件且不运行YOLO |
+| `target_selection.circle_refinement_enabled` | `true` | 无YOLO时：`true`使用圆拟合中心；`false`直接使用请求框中心；支持热加载 |
 | `tools.<工件>.code` | 例如 `9-8-1` | 无YOLO模式由请求code动态选择工件；每个值必须唯一 |
 | `tools.<工件>.target_color` | `red/green/black/auto` | 无YOLO模式期望颜色；缺省为自动识别 |
 | `target_matching.source_image_width/height` | `1920/1080` | 客户端框选坐标对应的原图尺寸 |
-| `target_matching.circle_refinement.enabled` | `true` | 无YOLO时启用最大有效外圆拟合 |
+| `target_matching.circle_refinement.enabled` | `true` | 仅作为旧工具配置缺少热加载开关时的兼容默认值 |
 
 如果更换相机、相机与法兰的安装关系、活动TCP或工具安装位置，必须重新验证相机标定、手眼标定及 `standard_to_tool`，不能只改IP。
 
@@ -69,11 +70,20 @@ HTTP输入和输出均为 JAKA 基座系 `mm + RPY rad`。算法内部及 YAML �
 现场运动的预备距离不属于正式视觉解算配置，位于 `field_test/test_case.yaml`：
 
 ```yaml
+case:
+  live: true
+  base_label: 5
+
 jaka_test:
   approach_distance_mm: 200.0
+  return_to_capture_pose: true
 ```
 
+`case.live` 决定现场测试请求是实时采集还是使用最近快照缓存；`case.base_label` 指定LabelMe中的安装面板标签，填写 `null` 或 `0` 可关闭。二者配置后，直接执行 `bash run_field_test.sh` 即可；命令行参数只用于临时覆盖。
+
 方向不在YAML中指定。`run_field_test` 通过 `/motion/get_tcp_pose` 取得当次平面法向在JAKA基座系下的单位向量，自动适应车辆正对、侧对或斜对柜体。工具标定和 `/get_tcp_pose` 正式响应不受该配置影响。
+
+`return_to_capture_pose` 控制到达工作位后的行为：`true` 沿相反法向退回预备位并继续返回拍照TCP，`false` 则保持在最终工作TCP，不执行退出动作。该字段必须填写YAML布尔值 `true/false`，不要加引号。命令行 `--return-to-capture` 或 `--stay-at-work` 可以临时覆盖它。关闭返回后工具可能持续接触工件，必须由现场流程负责后续安全撤退。
 
 ## v3光心参考、标准TCP与工具工作位
 
@@ -97,7 +107,15 @@ v3拒绝加载旧字段 `camera_to_tool`，以免把旧综合参数误当成新�
 
 运行中只允许热更新 `tool_offsets.yaml`。修改 `workflow.yaml` 中的相机、YOLO、手眼、全局修正、端口或其他参数后仍需重启服务。
 
-### YAML分步骤标定工具
+### 一次运行的交互式标定工具
+
+现场推荐执行 `bash tool/run_interactive_tool_calibration.sh`。它从 `tool/interactive_tool_calibration.yaml` 读取JAKA地址和文件路径，随后全部操作通过终端提示完成：按code选择工件、选择模式、确认读取当前TCP、等待人工示教、计算并自动写回工具偏移。每次启动先覆盖生成唯一备份 `tool/tool_offsets.backup.yaml`，最近一次成功结果写到 `tool/interactive_tool_calibration_result.yaml`。
+
+模式3默认使用标准/相机参考坐标系。XYZ增量在统一解算的标准TCP坐标系中表达，因此相机朝向JAKA基座 `+X`、`+Y`、`-Y` 或斜向时，微调仍跟随柜体/相机参考方向；只有在提示中显式选择JAKA基座坐标系时，XYZ才表示固定的基座轴方向。两种模式都会用刚体矩阵重新计算 `standard_to_tool`，而不是直接猜测YAML中的偏移分量。
+
+该程序只读取JAKA当前活动TCP，不控制机械臂运动。正式配置采用原子替换并由视觉服务加载器校验；校验失败会立即用本次启动备份恢复。
+
+### 旧版YAML分步骤标定工具
 
 `tool/tool_calibration.yaml` 是独立的现场标定操作面板，不参与视觉服务启动。主要字段：
 
@@ -109,7 +127,7 @@ v3拒绝加载旧字段 `camera_to_tool`，以免把旧综合参数误当成新�
 - `files.record_file`：自动记录每一步与最后结果；
 - `output.apply_to_tool_offsets`：默认 `false`；设为 `true` 时备份并更新正式工具偏移。
 
-详细操作见 [tool/README.md](tool/README.md)。该工具不会发送机械臂运动指令。
+该入口继续保留用于离线或分阶段操作。详细说明见 [tool/README.md](tool/README.md)。
 
 每个工具必须包含：
 
@@ -117,6 +135,7 @@ v3拒绝加载旧字段 `camera_to_tool`，以免把旧综合参数误当成新�
 version: 1
 target_selection:
   use_yolo: true
+  circle_refinement_enabled: true
 tools:
   class_name:
     code: "9-8-1"
@@ -133,14 +152,18 @@ tools:
 ### 目标选择模式
 
 - `use_yolo: true`：保持原有流程。YOLO先检测并分类，再用请求 `target` 框中心选择最近的检测目标；请求 `code` 可以省略。
-- `use_yolo: false`：本次请求不执行YOLO推理。算法将请求 `target` 粗框附近的圆候选按圆心聚类，使用本次 `code` 对应工件的 `target_color` 参与筛选，再选择最近工件组的最大有效外圆圆心；随后叠加该工件工具偏移。
+- `use_yolo: false`：本次请求不执行YOLO推理，并通过请求 `code` 选择工件及工具偏移。
+- `circle_refinement_enabled: true`：仅在无YOLO模式生效。算法将请求 `target` 粗框附近的圆候选按圆心聚类，使用该工件的 `target_color` 参与筛选，再采用最近工件组的最大有效外圆圆心。
+- `circle_refinement_enabled: false`：完全跳过圆拟合和颜色筛选，目标中心严格等于请求 `target` 的几何中心。
 - 工件 `code` 必须是非空字符串并全局唯一；对应工件必须 `enabled: true`。缺少code返回400，未知或禁用的code返回422。
-- 模式、code映射和工具偏移一起热加载，修改保存后下一次解算生效，无需重启。初始即为无YOLO模式时不会预加载YOLO；以后热切换为YOLO时会在第一次YOLO请求中按需加载。
+- 模式、圆拟合开关、code映射和工具偏移一起热加载，修改保存后下一次解算生效，无需重启。初始即为无YOLO模式时不会预加载YOLO；以后热切换为YOLO时会在第一次YOLO请求中按需加载。
 - v3.3配置中的 `target_selection.selected_tool` 可以暂时保留以方便文件升级，但v3.4无YOLO流程会忽略它。
 
 无YOLO圆心模式可以使用YOLO模型中不存在的新工件，只需先在 `tools:` 下新增、标定并分配唯一 `code`。若 `pose.alignment_mode: camera_center`，仍只输出标准光心TCP；若要叠加指定工件的 `standard_to_tool`，应设置为 `pose.alignment_mode: tool`。
 
 ### 无YOLO圆心拟合参数
+
+运行时开关应修改 `config/tool_offsets.yaml` 的 `target_selection.circle_refinement_enabled`。下面这些参数仍位于 `workflow.yaml`，只控制开关开启后的拟合细节，修改后需要重启服务。旧工具文件没有新开关时，`enabled` 继续作为兼容默认值。
 
 - `enabled`：是否在无YOLO分支启用圆心修正；关闭时保留v3.4的原框中心行为；
 - `expand_ratio`：相对请求框宽高向外扩大的搜索比例；

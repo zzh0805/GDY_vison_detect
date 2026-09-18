@@ -109,6 +109,7 @@ class ToolOffsetsSnapshot:
     source_path: Path
     tools: Dict[str, Any]
     use_yolo: bool
+    circle_refinement_enabled: bool | None
     code_to_tool: Dict[str, str]
     sha256: str
     modified_at_unix_s: float
@@ -150,6 +151,12 @@ def load_tool_offsets(path: Any) -> ToolOffsetsSnapshot:
     use_yolo = target_selection.get("use_yolo", True)
     if not isinstance(use_yolo, bool):
         raise ValueError("target_selection.use_yolo必须是true或false")
+    circle_refinement_enabled = target_selection.get(
+        "circle_refinement_enabled")
+    if circle_refinement_enabled is not None and not isinstance(
+            circle_refinement_enabled, bool):
+        raise ValueError(
+            "target_selection.circle_refinement_enabled必须是true或false")
     if not use_yolo and not any(
             bool(tools[class_name].get("enabled", True))
             for class_name in code_to_tool.values()):
@@ -159,6 +166,7 @@ def load_tool_offsets(path: Any) -> ToolOffsetsSnapshot:
         source_path=source,
         tools=tools,
         use_yolo=use_yolo,
+        circle_refinement_enabled=circle_refinement_enabled,
         code_to_tool=code_to_tool,
         sha256=hashlib.sha256(payload).hexdigest(),
         modified_at_unix_s=float(after.st_mtime),

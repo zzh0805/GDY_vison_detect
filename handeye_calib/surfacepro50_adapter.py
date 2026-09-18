@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import contextlib
 import io
+import logging
 import os
 import platform
 import re
@@ -428,7 +429,8 @@ class SurfacePro50Backend:
 
     def __init__(self, endpoint: str = "auto", capture_3d: bool = False,
                  openni_redist: Optional[str] = None,
-                 unload_openni_on_disconnect: Optional[bool] = None):
+                 unload_openni_on_disconnect: Optional[bool] = None,
+                 fresh_frame_timeout_s: Optional[float] = None):
         self.endpoint = str(endpoint or "auto")
         self.capture_3d = bool(capture_3d)
         calibration_value = os.environ.get(
@@ -507,6 +509,26 @@ class SurfacePro50Backend:
         self._profiles: Dict[str, Any] = {}
         self._current_profile = ""
         self._lock = threading.RLock()
+        # OpenNI 网口流在无人读取时可能积压旧机位数据。后台泵只复制最新的
+        # 原始彩色/深度帧，不执行灰度、软件配准或点云重建；请求到来时再等待
+        # 两路各产生一帧比请求开始更新的数据。这样既清除旧帧，又不把重计算
+        # 放进常驻线程。
+        if fresh_frame_timeout_s is None:
+            self.fresh_frame_timeout_s = _positive_env_float(
+                "SURFACEPRO50_FRESH_FRAME_TIMEOUT_S", 3.0)
+        else:
+            self.fresh_frame_timeout_s = float(fresh_frame_timeout_s)
+            if (not np.isfinite(self.fresh_frame_timeout_s) or
+                    self.fresh_frame_timeout_s <= 0.0):
+                raise ValueError("fresh_frame_timeout_s必须是正有限数字")
+        self._frame_condition = threading.Condition()
+        self._frame_pump_stop = threading.Event()
+        self._frame_pump_thread: Optional[threading.Thread] = None
+        self._latest_image_raw: Optional[Dict[str, Any]] = None
+        self._latest_depth_raw: Optional[Dict[str, Any]] = None
+        self._image_raw_sequence = 0
+        self._depth_raw_sequence = 0
+        self._frame_pump_last_error = ""
         self._connected = False
         self.device_description = ""
         self._dll_handles = []
@@ -593,6 +615,25 @@ class SurfacePro50Backend:
                 self.point_cloud_frame = "surfacepro50_depth_optical"
                 self.point_cloud_handeye_compatible = True
             self._connected = True
+            image_mode = self.image_stream.get_video_mode()
+            image_bytes = (
+                int(image_mode.resolutionX) * int(image_mode.resolutionY) *
+                (3 if self.image_sensor == "color" else 2))
+            depth_bytes = 0
+            if (self.depth_stream is not None and
+                    self.depth_stream is not self.image_stream):
+                depth_mode = self.depth_stream.get_video_mode()
+                depth_bytes = (
+                    int(depth_mode.resolutionX) *
+                    int(depth_mode.resolutionY) * 2)
+            logging.getLogger("vision_service.camera").info(
+                "SurfacePro50流诊断: Color=%s Depth=%s "
+                "原始数据量=%.2fMiB/彩深组 曝光参数=%s",
+                self.image_profile or _mode_key(image_mode),
+                self.depth_profile or "无",
+                (image_bytes + depth_bytes) / (1024.0 * 1024.0),
+                self.get_parameters())
+            self._start_frame_pump()
         except Exception:
             self.disconnect()
             raise
@@ -664,6 +705,299 @@ class SurfacePro50Backend:
             raise RuntimeError(
                 "缺少知象标定 YAML，无法进行软件 Depth-to-RGB 配准")
 
+    @staticmethod
+    def _raw_frame_info(frame: Any) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for name in ("frameIndex", "timestamp"):
+            value = getattr(frame, name, None)
+            value = getattr(value, "value", value)
+            if isinstance(value, np.generic):
+                value = value.item()
+            result[name] = value
+        return result
+
+    def _copy_image_raw_frame(self, frame: Any) -> Dict[str, Any]:
+        """在驱动帧释放前复制图像原始数据；不执行灰度或点云计算。"""
+        height, width = int(frame.height), int(frame.width)
+        if self.image_sensor == "color":
+            data = np.asarray(
+                frame.get_buffer_as_triplet(), dtype=np.uint8
+            ).reshape(height, width, 3).copy()
+            encoding = "rgb8"
+        else:
+            data = np.asarray(
+                frame.get_buffer_as_uint16(), dtype=np.uint16
+            ).reshape(height, width).copy()
+            encoding = "uint16"
+        return {
+            "data": data,
+            "encoding": encoding,
+            "width": width,
+            "height": height,
+            "arrival_monotonic": time.monotonic(),
+            **self._raw_frame_info(frame),
+        }
+
+    def _copy_depth_raw_frame(self, frame: Any) -> Dict[str, Any]:
+        """在驱动帧释放前复制原始 Z16 和像素格式。"""
+        height, width = int(frame.height), int(frame.width)
+        data = np.asarray(
+            frame.get_buffer_as_uint16(), dtype=np.uint16
+        ).reshape(height, width).copy()
+        mode = getattr(frame, "videoMode", None)
+        if mode is None and self.depth_stream is not None:
+            mode = self.depth_stream.get_video_mode()
+        return {
+            "data": data,
+            "width": width,
+            "height": height,
+            "pixel_format": int(mode.pixelFormat),
+            "arrival_monotonic": time.monotonic(),
+            **self._raw_frame_info(frame),
+        }
+
+    def _frame_pump_loop(self) -> None:
+        """持续消费 SDK 队列，只发布每路最新一帧。"""
+        image_stream = self.image_stream
+        depth_stream = self.depth_stream
+        streams = [image_stream]
+        if depth_stream is not None and depth_stream is not image_stream:
+            streams.append(depth_stream)
+        wait = getattr(self.openni2, "wait_for_any_stream", None)
+        log = logging.getLogger("vision_service.camera")
+        try:
+            while not self._frame_pump_stop.is_set():
+                try:
+                    ready = wait(streams, timeout=0.1)
+                    if ready is None:
+                        continue
+                    # 标准 openni-python 返回原 streams 中的对象；兼容少数包装
+                    # 返回就绪索引的行为。
+                    if isinstance(ready, (int, np.integer)):
+                        ready_index = int(ready)
+                        if ready_index < 0 or ready_index >= len(streams):
+                            raise RuntimeError(
+                                f"wait_for_any_stream返回非法索引{ready_index}")
+                        ready = streams[ready_index]
+                    is_image = ready is image_stream
+                    is_depth = ready is depth_stream
+                    if not is_image and not is_depth:
+                        for stream in streams:
+                            if id(ready) == id(stream):
+                                is_image = stream is image_stream
+                                is_depth = stream is depth_stream
+                                ready = stream
+                                break
+                    if not is_image and not is_depth:
+                        raise RuntimeError("wait_for_any_stream返回了未知流")
+
+                    # 两路同时就绪时，部分包装总返回列表中的第一路。把刚读取
+                    # 的流移到末尾，避免彩色长期占据首位而让深度流饥饿。
+                    if len(streams) > 1:
+                        for ready_index, stream in enumerate(streams):
+                            if ready is stream:
+                                streams.append(streams.pop(ready_index))
+                                break
+
+                    frame = self._read_stream_frame(
+                        ready,
+                        "图像后台取流" if is_image else "深度后台取流",
+                        check_discard_baseline=False,
+                        capture_python_output=False)
+                    try:
+                        image_snapshot = (
+                            self._copy_image_raw_frame(frame)
+                            if is_image else None)
+                        depth_snapshot = (
+                            self._copy_depth_raw_frame(frame)
+                            if is_depth else None)
+                    finally:
+                        del frame
+
+                    with self._frame_condition:
+                        if image_snapshot is not None:
+                            self._image_raw_sequence += 1
+                            image_snapshot["sequence"] = self._image_raw_sequence
+                            self._latest_image_raw = image_snapshot
+                        if depth_snapshot is not None:
+                            self._depth_raw_sequence += 1
+                            depth_snapshot["sequence"] = self._depth_raw_sequence
+                            self._latest_depth_raw = depth_snapshot
+                        self._frame_pump_last_error = ""
+                        self._frame_condition.notify_all()
+                except Exception as exc:
+                    if self._frame_pump_stop.is_set():
+                        break
+                    with self._frame_condition:
+                        self._frame_pump_last_error = (
+                            f"{type(exc).__name__}: {exc}")
+                        self._frame_condition.notify_all()
+                    log.warning("SurfacePro50后台取流异常，将继续重试: %s", exc)
+                    time.sleep(0.05)
+        finally:
+            with self._frame_condition:
+                self._frame_condition.notify_all()
+
+    def _start_frame_pump(self) -> None:
+        wait = getattr(self.openni2, "wait_for_any_stream", None)
+        if not callable(wait):
+            raise RuntimeError(
+                "当前OpenNI Python包不支持wait_for_any_stream，"
+                "无法启动最新帧缓存")
+        thread = self._frame_pump_thread
+        if thread is not None and thread.is_alive():
+            return
+        with self._frame_condition:
+            self._latest_image_raw = None
+            self._latest_depth_raw = None
+            self._image_raw_sequence = 0
+            self._depth_raw_sequence = 0
+            self._frame_pump_last_error = ""
+        self._frame_pump_stop.clear()
+        thread = threading.Thread(
+            target=self._frame_pump_loop,
+            name="surfacepro50-latest-frame",
+            daemon=True)
+        self._frame_pump_thread = thread
+        thread.start()
+        logging.getLogger("vision_service.camera").info(
+            "SurfacePro50最新帧后台缓存已启动: "
+            "彩色新帧优先等待=%.3fs，超时后允许现有彩色缓存",
+            self.fresh_frame_timeout_s)
+
+    def _stop_frame_pump(self, timeout_s: float = 1.0) -> None:
+        self._frame_pump_stop.set()
+        with self._frame_condition:
+            self._frame_condition.notify_all()
+        thread = self._frame_pump_thread
+        if (thread is not None and thread.is_alive() and
+                thread is not threading.current_thread()):
+            thread.join(timeout=max(0.0, float(timeout_s)))
+
+    def _wait_for_fresh_raw_frames(
+            self, build_3d: bool,
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Dict[str, Any]]:
+        """以彩色为主帧；优先等新彩色，超时后无条件接受现有缓存。"""
+        started = time.monotonic()
+        deadline = started + self.fresh_frame_timeout_s
+        with self._frame_condition:
+            image_baseline = self._image_raw_sequence
+            depth_baseline = self._depth_raw_sequence
+            image_at_request = self._latest_image_raw
+            selected_image: Optional[Dict[str, Any]] = None
+            selected_image_after_request = False
+            cached_color_fallback = False
+            depth_sequence_when_color_selected = depth_baseline
+            while True:
+                now = time.monotonic()
+                latest_image = self._latest_image_raw
+                latest_depth = self._latest_depth_raw
+                image_after_request = bool(
+                    latest_image is not None and
+                    int(latest_image.get("sequence", 0)) > image_baseline)
+                if selected_image is None:
+                    if image_after_request:
+                        selected_image = latest_image
+                        selected_image_after_request = True
+                        depth_sequence_when_color_selected = (
+                            self._depth_raw_sequence)
+                    elif now >= deadline:
+                        # 用户的拍照位在请求前已保持不变：3秒仍无新彩色时，
+                        # 无条件接受后台现有彩色，不再按帧龄拒绝。
+                        selected_image = latest_image or image_at_request
+                        if selected_image is not None:
+                            cached_color_fallback = True
+                            depth_sequence_when_color_selected = (
+                                self._depth_raw_sequence)
+
+                depth = latest_depth if build_3d else None
+                image_arrival = (
+                    None if selected_image is None else
+                    float(selected_image["arrival_monotonic"]))
+                depth_arrival = (
+                    None if depth is None else
+                    float(depth["arrival_monotonic"]))
+                depth_after_color = bool(
+                    not build_3d or (
+                        depth is not None and (
+                            (cached_color_fallback and
+                             depth_arrival is not None and
+                             image_arrival is not None and
+                             depth_arrival >= image_arrival) or
+                            (int(depth.get("sequence", 0)) > depth_baseline and
+                             depth_arrival is not None and
+                             image_arrival is not None and
+                             depth_arrival >= image_arrival) or
+                            int(depth.get("sequence", 0)) >
+                            depth_sequence_when_color_selected)))
+                if selected_image is not None and depth_after_color:
+                    finished = now
+                    image = selected_image
+                    depth_after_request = bool(
+                        depth is not None and
+                        int(depth.get("sequence", 0)) > depth_baseline)
+                    image_cache_age_s = max(
+                        0.0, started - float(image["arrival_monotonic"]))
+                    metadata = {
+                        "fresh_frame_wait_ms": (finished - started) * 1000.0,
+                        "image_raw_sequence": int(image["sequence"]),
+                        "depth_raw_sequence": (
+                            None if depth is None
+                            else int(depth["sequence"])),
+                        "image_frame_index": image.get("frameIndex"),
+                        "image_frame_timestamp": image.get("timestamp"),
+                        "depth_frame_index": (
+                            None if depth is None else depth.get("frameIndex")),
+                        "depth_frame_timestamp": (
+                            None if depth is None else depth.get("timestamp")),
+                        "raw_arrival_skew_ms": (
+                            None if depth_arrival is None else
+                            abs(image_arrival - depth_arrival) * 1000.0),
+                        "image_frame_after_request": (
+                            selected_image_after_request),
+                        "depth_frame_after_request": (
+                            None if not build_3d else depth_after_request),
+                        "depth_frame_after_color": (
+                            None if not build_3d else depth_after_color),
+                        "image_cache_age_at_request_ms": (
+                            None if selected_image_after_request else
+                            image_cache_age_s * 1000.0),
+                        "fresh_frames_after_request": bool(
+                            selected_image_after_request and
+                            (not build_3d or depth_after_request)),
+                        "cached_color_fallback": cached_color_fallback,
+                        "latest_frame_cache_enabled": True,
+                        "color_master_depth_pairing": True,
+                    }
+                    logging.getLogger("vision_service.camera").info(
+                        "拍照帧就绪: 等待=%.1fms 图像序号=%s(%s) "
+                        "深度序号=%s(彩色后的深度) 两路到达差=%.1fms "
+                        "硬件帧号/时间戳: Color=%s/%s Depth=%s/%s",
+                        metadata["fresh_frame_wait_ms"],
+                        metadata["image_raw_sequence"],
+                        ("请求后新帧" if selected_image_after_request else
+                         f"3秒超时后接受缓存"
+                         f"{image_cache_age_s * 1000.0:.1f}ms"),
+                        metadata["depth_raw_sequence"],
+                        (float(metadata["raw_arrival_skew_ms"])
+                         if metadata["raw_arrival_skew_ms"] is not None
+                         else float("nan")),
+                        metadata["image_frame_index"],
+                        metadata["image_frame_timestamp"],
+                        metadata["depth_frame_index"],
+                        metadata["depth_frame_timestamp"])
+                    return image, depth, metadata
+
+                thread = self._frame_pump_thread
+                if thread is None or not thread.is_alive():
+                    raise RuntimeError(
+                        "SurfacePro50最新帧后台线程已停止: "
+                        f"{self._frame_pump_last_error or '无驱动错误信息'}")
+                wait_timeout = 0.2
+                if selected_image is None and now < deadline:
+                    wait_timeout = min(wait_timeout, deadline - now)
+                self._frame_condition.wait(timeout=wait_timeout)
+
     def _read_intrinsics(self, stream: Any) -> Tuple[np.ndarray, np.ndarray]:
         try:
             intr = stream.get_property(CS_PROPERTY_STREAM_INTRINSICS, CSIntrinsics)
@@ -704,6 +1038,8 @@ class SurfacePro50Backend:
 
     def disconnect(self) -> None:
         global _OPENNI_INITIALIZED
+        # 先通知后台停止；如果它正卡在厂家 read_frame，随后停止流可帮助其退出。
+        self._stop_frame_pump(timeout_s=1.0)
         with self._lock:
             seen = set()
             for stream in (self.image_stream, self.depth_stream):
@@ -725,6 +1061,12 @@ class SurfacePro50Backend:
                 pass
             self.image_stream = self.depth_stream = self.device = None
             self._connected = False
+            self._stop_frame_pump(timeout_s=1.0)
+            self._frame_pump_thread = None
+            with self._frame_condition:
+                self._latest_image_raw = None
+                self._latest_depth_raw = None
+                self._frame_condition.notify_all()
             if self.openni2 is not None and self.unload_openni_on_disconnect:
                 try:
                     self.openni2.unload()
@@ -753,82 +1095,205 @@ class SurfacePro50Backend:
         return np.clip((image.astype(np.float32) - lo) * (255.0 / (hi - lo)),
                        0, 255).astype(np.uint8)
 
-    def _read_stream_frame(self, stream: Any, channel: str):
+    def _read_stream_frame(self, stream: Any, channel: str,
+                           check_discard_baseline: bool = True,
+                           capture_python_output: bool = True):
         """默认隐藏厂商Python封装的逐帧print；异常时回放其诊断输出。"""
-        if self.show_frame_output:
-            return stream.read_frame()
+        started = time.monotonic()
         captured = io.StringIO()
         try:
-            with contextlib.redirect_stdout(captured):
-                return stream.read_frame()
+            # redirect_stdout会修改进程级sys.stdout，不能在常驻后台线程中
+            # 持续使用，否则可能截走HTTP/日志线程的输出。
+            if self.show_frame_output or not capture_python_output:
+                frame = stream.read_frame()
+            else:
+                with contextlib.redirect_stdout(captured):
+                    frame = stream.read_frame()
         except BaseException:
             driver_output = captured.getvalue().strip()
             if driver_output:
                 print(f"SurfacePro50 {channel}取帧异常时驱动输出:\n{driver_output}")
             raise
+        elapsed = time.monotonic() - started
+        info = {name: getattr(frame, name, None)
+                for name in ("frameIndex", "timestamp")}
+        log = logging.getLogger("vision_service.camera")
+        log.log(logging.WARNING if elapsed > 0.5 else logging.DEBUG,
+                "相机读帧: 通道=%s 耗时=%.3fs 帧信息=%s", channel, elapsed, info)
+        if elapsed > 0.5 and captured.getvalue().strip():
+            log.warning("慢取帧驱动输出: %s", captured.getvalue()[-2000:])
+        baseline = getattr(self, "_discard_baselines", {}).get(id(stream))
+        if check_discard_baseline and "丢帧" not in channel and baseline:
+            compared = False
+            for name in ("frameIndex", "timestamp"):
+                before, after = baseline.get(name), info.get(name)
+                # 部分厂家流以0表示未提供帧元数据，不可据此判断重复帧。
+                if (isinstance(before, (int, float)) and
+                        isinstance(after, (int, float)) and
+                        np.isfinite(before) and np.isfinite(after) and
+                        before > 0 and after > 0):
+                    compared = True
+                    if after <= before:
+                        del frame
+                        raise RuntimeError(
+                            f"{channel}帧未比丢弃帧更新: {name}={after}, 丢弃末帧={before}")
+            log.log(logging.INFO if compared else logging.WARNING,
+                     "最终帧检查: 通道=%s 基准=%s 当前=%s 状态=%s",
+                     channel, baseline, info,
+                     "帧号/时间戳递增（不代表绝对帧龄或双流同步）" if compared else "SDK未提供可比较帧信息")
+        return frame
 
     def discard_frames(self, duration_s: float) -> int:
-        """在指定时间内持续消费原始流，最后一次完整采集得到最新帧。
+        """在指定预算内轮询并消费就绪原始帧，随后另行完整采集。
 
         这里只从 OpenNI2 彩色/深度流读取并立即释放帧对象，不解码图像、
         不做软件配准，也不构建点云，避免用多次完整 capture() 清缓存时产生
-        大量瞬时内存。彩色流和深度流每轮各消费一帧，尽量保持两边队列同步。
+        大量瞬时内存。两路独立轮询，计数不代表硬件同步配对。
         """
         duration = float(duration_s)
         if not np.isfinite(duration) or duration < 0.0:
             raise ValueError("丢帧时长必须是非负有限数字")
         if duration == 0.0:
+            self._discard_baselines = {}
             self.last_discarded_frame_pairs = 0
             self.last_discard_duration_s = 0.0
             return 0
 
-        with self._lock:
+        # 正式后端由后台线程持续消费原始流。兼容保留本接口时这里只等待指定
+        # 稳定期并统计后台推进量，不再与后台线程竞争 read_frame。最终 capture
+        # 还会强制等待请求之后的下一组新帧。
+        pump = getattr(self, "_frame_pump_thread", None)
+        if pump is not None and pump.is_alive():
             if not self.is_connected():
                 raise RuntimeError("SurfacePro50 未连接")
             started = time.monotonic()
             deadline = started + duration
-            discarded = 0
-            while True:
-                image_frame = self._read_stream_frame(
-                    self.image_stream, "图像丢帧")
-                depth_frame = None
-                if (self.depth_stream is not None and
-                        self.depth_stream is not self.image_stream):
-                    depth_frame = self._read_stream_frame(
-                        self.depth_stream, "深度丢帧")
-                discarded += 1
-                # 显式释放厂商帧包装对象；下一轮或最终 capture() 再读取新帧。
-                del image_frame, depth_frame
-                if time.monotonic() >= deadline:
-                    break
+            with self._frame_condition:
+                image_start = self._image_raw_sequence
+                depth_start = self._depth_raw_sequence
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        break
+                    self._frame_condition.wait(timeout=min(0.2, remaining))
+                image_count = self._image_raw_sequence - image_start
+                if self.depth_stream is None:
+                    depth_count = image_count
+                else:
+                    depth_count = self._depth_raw_sequence - depth_start
+                image_latest = self._latest_image_raw
+                depth_latest = self._latest_depth_raw
+            discarded = min(image_count, depth_count)
+            self.last_discarded_frame_pairs = int(discarded)
+            self.last_discard_duration_s = time.monotonic() - started
+            self._discard_baselines = {}
+            if image_latest is not None and self.image_stream is not None:
+                self._discard_baselines[id(self.image_stream)] = {
+                    name: image_latest.get(name)
+                    for name in ("frameIndex", "timestamp")}
+            if (depth_latest is not None and self.depth_stream is not None and
+                    self.depth_stream is not self.image_stream):
+                self._discard_baselines[id(self.depth_stream)] = {
+                    name: depth_latest.get(name)
+                    for name in ("frameIndex", "timestamp")}
+            logging.getLogger("vision_service.camera").info(
+                "后台最新帧统计: 等待=%.3fs 图像推进=%d 深度推进=%d "
+                "末帧=%s；最终采集仍等待请求后的新帧",
+                self.last_discard_duration_s, image_count, depth_count,
+                {"图像": self._discard_baselines.get(id(self.image_stream)),
+                 "深度": self._discard_baselines.get(id(self.depth_stream))})
+            return int(discarded)
+
+        with self._lock:
+            if not self.is_connected():
+                raise RuntimeError("SurfacePro50 未连接")
+            wait = getattr(self.openni2, "wait_for_any_stream", None)
+            if not callable(wait):
+                raise RuntimeError("当前OpenNI Python包不支持wait_for_any_stream，无法执行有限等待丢帧")
+            self._discard_baselines = {}
+            started = time.monotonic()
+            deadline = started + duration
+            streams = [(self.image_stream, "图像丢帧")]
+            if self.depth_stream is not None and self.depth_stream is not self.image_stream:
+                streams.append((self.depth_stream, "深度丢帧"))
+            counts = {id(stream): 0 for stream, _ in streams}
+            # 逐路短轮询避免一路持续就绪导致另一条流饥饿。
+            # OpenNI Python标准包装的timeout单位是秒，内部转换为毫秒。
+            while time.monotonic() < deadline:
+                for stream, channel in streams:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    ready = wait([stream], timeout=min(0.05, remaining))
+                    if ready is None or time.monotonic() >= deadline:
+                        continue
+                    frame = self._read_stream_frame(stream, channel)
+                    self._discard_baselines[id(stream)] = {
+                        name: getattr(frame, name, None)
+                        for name in ("frameIndex", "timestamp")}
+                    counts[id(stream)] += 1
+                    del frame
+            discarded = min(counts.values())
             self.last_discarded_frame_pairs = discarded
             self.last_discard_duration_s = time.monotonic() - started
+            logging.getLogger("vision_service.camera").info(
+                "丢帧统计: 预算=%.3fs 实际=%.3fs 各流=%s 末帧=%s；组数仅为两路计数最小值，非同步配对",
+                duration, self.last_discard_duration_s,
+                {channel: counts[id(stream)] for stream, channel in streams},
+                {channel: self._discard_baselines.get(id(stream)) for stream, channel in streams})
+            if any(count == 0 for count in counts.values()):
+                logging.getLogger("vision_service.camera").warning("部分流没有丢弃帧，最终帧缺少该路新鲜度比较基准")
+            if self.last_discard_duration_s > duration + 0.5:
+                logging.getLogger("vision_service.camera").warning("丢帧超过预算：底层就绪等待或read_frame未及时返回")
             return discarded
 
-    def _read_image(self) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        frame = self._read_stream_frame(self.image_stream, "图像")
-        h, w = int(frame.height), int(frame.width)
+    def _read_image(
+            self, snapshot: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        frame = None
+        if snapshot is None:
+            frame = self._read_stream_frame(self.image_stream, "图像")
+            h, w = int(frame.height), int(frame.width)
+        else:
+            h, w = int(snapshot["height"]), int(snapshot["width"])
         if self.image_sensor == "color":
-            rgb = np.asarray(frame.get_buffer_as_triplet(), dtype=np.uint8).reshape(h, w, 3).copy()
+            rgb = (
+                np.asarray(frame.get_buffer_as_triplet(), dtype=np.uint8)
+                .reshape(h, w, 3).copy()
+                if snapshot is None else
+                np.asarray(snapshot["data"], dtype=np.uint8).reshape(h, w, 3))
             bgr = rgb[:, :, ::-1].copy()
             # 与 OpenCV COLOR_BGR2GRAY 等价，避免后端强依赖 cv2。
             gray = np.clip(0.114 * bgr[:, :, 0] + 0.587 * bgr[:, :, 1] +
                            0.299 * bgr[:, :, 2], 0, 255).astype(np.uint8)
             return gray, bgr
-        raw = np.asarray(frame.get_buffer_as_uint16(), dtype=np.uint16).reshape(h, w).copy()
+        raw = (
+            np.asarray(frame.get_buffer_as_uint16(), dtype=np.uint16)
+            .reshape(h, w).copy()
+            if snapshot is None else
+            np.asarray(snapshot["data"], dtype=np.uint16).reshape(h, w))
         return self._uint16_to_gray(raw), None
 
-    def _read_depth(self, color_bgr: Optional[np.ndarray] = None
+    def _read_depth(self, color_bgr: Optional[np.ndarray] = None,
+                    snapshot: Optional[Dict[str, Any]] = None
                     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray],
                                float, Optional[np.ndarray]]:
         if self.depth_stream is None:
             return None, None, 1.0, None
-        frame = self._read_stream_frame(self.depth_stream, "深度")
-        h, w = int(frame.height), int(frame.width)
-        raw = np.asarray(frame.get_buffer_as_uint16(), dtype=np.uint16).reshape(h, w).copy()
+        if snapshot is None:
+            frame = self._read_stream_frame(self.depth_stream, "深度")
+            h, w = int(frame.height), int(frame.width)
+            raw = np.asarray(
+                frame.get_buffer_as_uint16(), dtype=np.uint16
+            ).reshape(h, w).copy()
+            pixel_format = int(frame.videoMode.pixelFormat)
+        else:
+            h, w = int(snapshot["height"]), int(snapshot["width"])
+            raw = np.asarray(
+                snapshot["data"], dtype=np.uint16).reshape(h, w)
+            pixel_format = int(snapshot["pixel_format"])
         self.last_raw_depth_size = (w, h)
         self.last_depth_output_size = (w, h)
-        pixel_format = int(frame.videoMode.pixelFormat)
         if pixel_format == int(
                 self._oni.OniPixelFormat.ONI_PIXEL_FORMAT_DEPTH_100_UM):
             scale_mm = 0.1
@@ -886,10 +1351,15 @@ class SurfacePro50Backend:
             attempts = self.empty_depth_retry_count + 1
             gray = color = depth = points = point_colors = None
             depth_scale = 1.0
+            fresh_frame_metadata: Dict[str, Any] = {}
             for attempt in range(attempts):
-                gray, color = self._read_image()
+                (image_snapshot, depth_snapshot,
+                 fresh_frame_metadata) = self._wait_for_fresh_raw_frames(
+                     build_3d)
+                gray, color = self._read_image(image_snapshot)
                 if build_3d:
-                    depth, points, depth_scale, point_colors = self._read_depth(color)
+                    depth, points, depth_scale, point_colors = self._read_depth(
+                        color, depth_snapshot)
                 if not build_3d:
                     break
                 if _has_valid_points(points):
@@ -950,11 +1420,13 @@ class SurfacePro50Backend:
                         self.last_discard_duration_s,
                     "depth_valid_min_mm": self.min_depth_mm,
                     "depth_valid_max_mm": self.max_depth_mm,
+                    **fresh_frame_metadata,
                     **self.last_depth_stats,
                 })
             # 丢帧统计只描述紧邻本次采集的预处理，不能泄漏到下一次采集。
             self.last_discarded_frame_pairs = 0
             self.last_discard_duration_s = 0.0
+            self._discard_baselines = {}
             self.frame_id += 1
             return frame
 
@@ -1014,21 +1486,37 @@ class SurfacePro50Backend:
         mode = self._profiles.get(str(name))
         if mode is None or self.image_stream is None:
             return False
+        # 切换视频模式时必须暂时停掉后台取流线程，避免它和
+        # stream.stop()/start() 同时访问 OpenNI 流。
+        restart_pump = self.is_connected()
+        if restart_pump:
+            self._stop_frame_pump(timeout_s=1.0)
         with self._lock:
             try:
                 self.image_stream.stop()
+                # stop() 会唤醒某些实现中仍阻塞在 read_frame() 的线程。
+                if restart_pump:
+                    self._stop_frame_pump(timeout_s=1.0)
                 self.image_stream.set_video_mode(mode)
                 self.image_stream.start()
                 self._current_profile = str(name)
                 self.image_intrinsics = self._read_intrinsics(self.image_stream)
                 self.image_intrinsics_source = self._last_intrinsics_source
-                return True
+                success = True
             except Exception:
                 try:
                     self.image_stream.start()
                 except Exception:
                     pass
+                success = False
+        if restart_pump:
+            thread = self._frame_pump_thread
+            if thread is not None and thread.is_alive():
+                logging.getLogger("vision_service.camera").error(
+                    "切换视频模式后旧的SurfacePro50取流线程未能退出")
                 return False
+            self._start_frame_pump()
+        return success
 
 
 class SurfacePro50SyncAdapter:
@@ -1040,7 +1528,8 @@ class SurfacePro50SyncAdapter:
         self.backend = SurfacePro50Backend(endpoint, capture_3d,
                                            kwargs.get("openni_redist"),
                                            kwargs.get(
-                                               "unload_openni_on_disconnect"))
+                                               "unload_openni_on_disconnect"),
+                                           kwargs.get("fresh_frame_timeout_s"))
 
     def connect(self, endpoint: Optional[str] = None) -> None:
         self.backend.connect(endpoint)
@@ -1078,6 +1567,7 @@ class SurfacePro50AsyncAdapter(QtCore.QThread):
             "endpoint": endpoint,
             "capture_3d": capture_3d,
             "openni_redist": kwargs.get("openni_redist"),
+            "fresh_frame_timeout_s": kwargs.get("fresh_frame_timeout_s"),
         }
         if kwargs.get("unload_openni_on_disconnect") is not None:
             backend_kwargs["unload_openni_on_disconnect"] = kwargs[

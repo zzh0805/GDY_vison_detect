@@ -1,0 +1,16 @@
+# 交互式工具标定只需修改机器人连接和文件路径，标定过程在终端中提示。
+version: 1
+
+robot:
+  # 程序只读取当前活动TCP，不会向机械臂发送任何运动命令。
+  ip: 192.168.16.158
+  sdk_path: ""
+  timeout_s: 30.0
+
+files:
+  # 正式热加载工具配置。
+  tool_offsets_file: ../config/tool_offsets.yaml
+  # 固定名称的唯一备份；每次启动交互程序都会覆盖上一份。
+  backup_file: ./tool_offsets.backup.yaml
+  # 保存最近一次成功标定的输入、输出和校验结果；每次成功后覆盖。
+  result_file: ./interactive_tool_calibration_result.yaml

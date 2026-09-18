@@ -7,6 +7,10 @@
 确认 [field_test/test_case.yaml](field_test/test_case.yaml) 中：
 
 ```yaml
+case:
+  live: true
+  base_label: 5
+
 jaka_test:
   start_jaka: false
   work_jaka: false
@@ -49,19 +53,22 @@ bash run_field_test.sh
 
 此时 `work_jaka=false`，脚本只显示和保存坐标，不发送运动命令。结果写入运行时生成的 `field_test/output/test_result.json`。
 
-需要验证实时采集时：
+`case.live: true` 时，直接运行上面的无参数命令就是实时采集：
 
 ```bash
-bash run_field_test.sh --live
+bash run_field_test.sh
 ```
 
 服务会在收到这个实时解算请求后，于 `http.live_capture_delay_s`（当前4秒）内持续读取并丢弃旧的原始彩色/深度帧，再拍照、检测和解算。该时段替代原来的纯等待，期间机械臂、相机和目标必须保持静止。
+
+`case.base_label: 5` 表示从LabelMe标注中读取标签 `5` 的矩形作为安装面板base。填写 `null` 或 `0` 表示不传base矩形。`live`、`base_label` 和 `code` 都配置好以后，日常只需运行 `bash run_field_test.sh`。
 
 测试YOLO模型中不存在的工件时，可先在 `config/tool_offsets.yaml` 中设置：
 
 ```yaml
 target_selection:
   use_yolo: false
+  circle_refinement_enabled: true
 
 tools:
   your_tool_key:
@@ -80,13 +87,14 @@ case:
   code: "9-8-1"
 ```
 
-也可以用命令行临时覆盖：
+也可以用命令行临时覆盖YAML：
 
 ```bash
 bash run_field_test.sh --live --base-label 5 --code 9-8-1
+bash run_field_test.sh --no-live --base-label 0
 ```
 
-保存后直接再次运行现场测试，不需要重启服务。此时不会再调用YOLO；程序根据请求 `code` 读取工件的 `target_color`，在传入矩形附近用红绿黑颜色筛选目标，并使用最近工件组的最大有效外圆圆心。若要应用该工件偏移，确认 `workflow.yaml` 使用 `pose.alignment_mode: tool`。
+保存后直接再次运行现场测试，不需要重启服务。此时不会再调用YOLO；`circle_refinement_enabled: true` 时，程序根据请求 `code` 读取工件的 `target_color`，在传入矩形附近用红绿黑颜色筛选目标，并使用最近工件组的最大有效外圆圆心；改为 `false` 时，下一次请求会完全跳过拟合并直接采用传入矩形的几何中心。若要应用该工件偏移，确认 `workflow.yaml` 使用 `pose.alignment_mode: tool`。
 
 现场第一次启用前检查 `workflow.yaml`：
 
@@ -98,7 +106,7 @@ target_matching:
     fallback_to_box_center: false
 ```
 
-修改这组拟合参数后需要重启服务。检测叠加图中黄色为原始框，绿色为实际采用的圆和圆心，蓝色箭头表示修正方向。若没有找到可靠圆，默认返回失败且不输出工作TCP；不要为了让机械臂继续运动而随意开启框中心回退。
+这里的 `enabled` 只用于兼容缺少新开关的旧版 `tool_offsets.yaml`。正常使用时由热加载的 `target_selection.circle_refinement_enabled` 控制启停；其余拟合参数修改后仍需重启服务。检测叠加图中黄色为原始框，绿色为实际采用的圆和圆心，蓝色箭头表示修正方向。若开启拟合但没有找到可靠圆，默认返回失败且不输出工作TCP；关闭拟合则直接使用框中心，不受 `fallback_to_box_center` 影响。
 
 只有在坐标、角度单位、方向和安全距离全部人工确认后，才可以将 `work_jaka` 改为 `true`。
 
@@ -108,8 +116,8 @@ target_matching:
 拍照位
   → 按当次柜体法向反退的预备位（已经采用最终工作姿态）
   → 沿柜体法向直线进入最终工作TCP
-  → 沿相反法向原路退回同一预备位
-  → 返回拍照位
+  → return_to_capture_pose=false：停留在最终工作TCP
+  → return_to_capture_pose=true：沿原路退回预备位，再返回拍照位
 ```
 
 只需要在 `field_test/test_case.yaml` 设置接近距离：
@@ -117,7 +125,13 @@ target_matching:
 ```yaml
 jaka_test:
   approach_distance_mm: 200.0
+  return_to_capture_pose: true
 ```
+
+- `return_to_capture_pose: true`：保持原行为，到达工作位后沿相反法向退回预备位，再返回记录的拍照TCP。
+- `return_to_capture_pose: false`：到达工作位后立即结束本次运动，保持在工作TCP，不执行退出或返回动作。
+
+关闭返回后工具可能持续接触工件，启用前必须确认该工件允许保持接触，并准备好后续独立撤退流程。
 
 进入方向来自当次解算的 `approachDirectionBase`，即安装平面法向转换到JAKA基座系后的单位向量。车正对柜体时它可能接近 `+X`，车侧对时可能接近 `+Y/-Y`，斜对时可以同时包含X/Y/Z分量，不需要人工选择轴。预备位置计算为 `最终位置 - approach_distance_mm × 进入方向`，全部RPY与最终工作TCP完全相同。
 
@@ -125,6 +139,16 @@ jaka_test:
 
 ```bash
 bash run_field_test.sh --live --base-label 5 --code 9-8-1 --approach-mm 200
+```
+
+也可以只覆盖本次运行：
+
+```bash
+# 本次停留在工作位
+bash run_field_test.sh --live --base-label 5 --code 9-8-1 --stay-at-work
+
+# 本次强制返回拍照位
+bash run_field_test.sh --live --base-label 5 --code 9-8-1 --return-to-capture
 ```
 
 旧参数 `--approach-x-mm` 仍可临时使用，但只取绝对值作为自动法向距离，不再表示固定基座X方向。脚本从工作位返回时严格反向经过同一个预备位，每段均使用JAKA直线运动。若平面法向缺失、不是有限数字或长度为0，运动接口返回422并禁止生成预备位。服务本身仍然只负责解算TCP，运动仅由现场测试脚本执行。

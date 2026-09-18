@@ -124,6 +124,77 @@ def directional_approach_pose_mm_rpy_deg(
     return approach
 
 
+def resolve_return_to_capture_pose(
+        jaka_config: Mapping[str, Any],
+        command_line_override: Any = None) -> bool:
+    """解析到达工作位后是否执行完整退出并返回拍照位。"""
+    if command_line_override is not None:
+        if not isinstance(command_line_override, bool):
+            raise ValueError("命令行返回拍照位开关必须是布尔值")
+        return command_line_override
+    value = jaka_config.get("return_to_capture_pose", True)
+    if not isinstance(value, bool):
+        raise ValueError(
+            "jaka_test.return_to_capture_pose必须填写true或false")
+    return value
+
+
+def resolve_live_capture(
+        case_config: Mapping[str, Any],
+        command_line_override: Any = None) -> bool:
+    """解析现场测试是否实时采集；命令行显式值优先于YAML。"""
+    value = (command_line_override if command_line_override is not None
+             else case_config.get("live", False))
+    if not isinstance(value, bool):
+        raise ValueError("case.live必须填写true或false")
+    return value
+
+
+def resolve_base_label(
+        case_config: Mapping[str, Any],
+        command_line_override: Any = None) -> Any:
+    """解析安装面板标签；空值或旧式0表示不传base矩形。"""
+    value = (command_line_override if command_line_override is not None
+             else case_config.get("base_label"))
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("case.base_label必须是LabelMe标签或null")
+    label = str(value).strip()
+    if not label or label == "0":
+        return None
+    return label
+
+
+def field_test_motion_waypoints(
+        approach_pose_mm_rpy_deg: Any,
+        work_pose_mm_rpy_deg: Any,
+        capture_pose_mm_rpy_deg: Any,
+        return_to_capture_pose: bool
+        ) -> Tuple[Tuple[str, np.ndarray], ...]:
+    """生成现场测试的实际运动序列，便于在不连接JAKA时完整验证。"""
+    if not isinstance(return_to_capture_pose, bool):
+        raise ValueError("return_to_capture_pose必须是布尔值")
+    approach = np.asarray(
+        approach_pose_mm_rpy_deg, dtype=np.float64).reshape(6)
+    work = np.asarray(work_pose_mm_rpy_deg, dtype=np.float64).reshape(6)
+    capture = np.asarray(
+        capture_pose_mm_rpy_deg, dtype=np.float64).reshape(6)
+    if not all(np.isfinite(item).all() for item in (
+            approach, work, capture)):
+        raise ValueError("现场运动路径必须全部为有限TCP")
+    waypoints = [
+        ("field_test_work_approach_pose", approach.copy()),
+        ("field_test_work_pose", work.copy()),
+    ]
+    if return_to_capture_pose:
+        waypoints.extend([
+            ("field_test_work_retreat_pose", approach.copy()),
+            ("field_test_return_capture_pose", capture.copy()),
+        ])
+    return tuple(waypoints)
+
+
 def read_labelme_corners(path: Path, label: str,
                          shape_index: int = 0) -> np.ndarray:
     # 兼容 Windows 工具保存的 UTF-16/UTF-8 BOM 标注文件：

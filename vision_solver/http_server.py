@@ -152,6 +152,14 @@ class VisionHttpServer:
                         return
                     self._send_json(
                         {"code": 404, "status": f"未知接口{path}"}, 404)
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError) as exc:
+                    # 客户端已超时或主动关闭连接，此时不能再次向同一套接字
+                    # 发送500响应；服务端任务和后续请求不受影响。
+                    log.warning(
+                        "HTTP %s 客户端已断开 %s: %s，耗时=%.1fms",
+                        client, path, exc,
+                        (time.perf_counter() - started) * 1000.0)
                 except Exception as exc:
                     # 单个HTTP处理器异常不能终止长期视觉服务。
                     log.error("HTTP %s 处理异常 %s: %s",

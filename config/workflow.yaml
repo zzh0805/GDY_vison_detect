@@ -21,13 +21,10 @@ http:
   listen_host: 0.0.0.0
   listen_port: 48051
   snapshot_directory: ../shared_images
-  # 两步流程：收到/snapshot后在此时长内持续读取并丢弃原始帧，随后采集。
-  # 这段主动丢帧替代纯sleep，既等待机械臂稳定，也清理OpenNI2积压帧。
-  snapshot_delay_s: 4
-  # 实时流程：收到/get_tcp_pose且live=true后在此时长内持续丢弃原始帧，
-  # 然后拍照并解算；固定框仍要求导航重复精度足够。
-  # 与snapshot_delay_s分开，避免两步流程重复等待。
-  live_capture_delay_s: 4
+  # 相机后台已经持续清理SDK队列，最终capture还会等待请求之后的新帧，
+  # 因此不再固定额外等待4秒。机械臂到位稳定仍由上位流程负责。
+  snapshot_delay_s: 0
+  live_capture_delay_s: 0
   # 快照是否保存图片到磁盘（默认开；关掉则/snapshot不落盘）。
   save_snapshot: true
   client_idle_timeout_s: 60  # 单次任务超时（live 实时采集含相机取帧，帧率低，需放宽）。
@@ -40,13 +37,16 @@ camera:
   openni_redist: ""
   show_driver_frame_output: false
   unload_openni_on_disconnect: false
+  # 优先等待请求后的新彩色帧；3秒仍没有时使用后台现有彩色缓存，
+  # 不因帧龄拒绝。彩色确定后再配下一张深度帧。
+  fresh_frame_timeout_s: 3.0
 
 calibration:
   handeye_result_file: ../calibration/handeye_result.json
   require_accepted: true
 
 yolo:
-  model_file: ../models/xuncao.pt
+  model_file: ../models/best.pt
   confidence: 0.5
   iou: 0.7
   device: ""

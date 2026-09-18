@@ -4,13 +4,55 @@
 
 - 解算沿用v2统一坐标链；目标匹配和相机流程保持原项目实现；
 - 工具标定独立到 `config/tool_offsets.yaml`，每次解算自动重新读取，无需重启服务；
-- SurfacePro50 连接与拍照使用旧项目已验证的直接取流流程；
+- SurfacePro50 使用后台最新帧缓存，并按彩色主帧选择后续深度帧；
 - 不包含历史快照、检测图、点云、结果报告、日志或 `__pycache__`；
 - 保留运行必需的 YOLO 模型、相机标定、手眼标定、配置和启动脚本。
 
 正式服务只计算目标 TCP，不控制机械臂运动。
 
 ## 当前版本
+
+`v3.8.3`（2026-09-18）更新内容：
+
+- SurfacePro50 改为后台持续消费相机队列并只保存彩色、深度各自的最新原始帧，减少请求时读取到旧机位缓存的概率；
+- 收到请求后以彩色帧为主：最多等待3秒获取请求后的新彩色帧，再选择彩色之后到达的深度帧；若3秒没有新彩色帧，则按现场“机器人已到位并保持静止”的前提使用现有彩色缓存，不再直接报超时；
+- 移除快照和实时检测固定额外等待4秒，机械臂到位稳定时间继续由上位流程负责；
+- 兼容厂家返回0、缺失或非有限帧号/时间戳的情况，不再用无效元数据误判旧帧；
+- 新增彩深序号、到达时间差、驱动帧号/时间戳、慢取帧和原始数据量日志，并增加独立流速诊断脚本；
+- 客户端提前超时断开时单独处理 Broken Pipe，不影响后续请求；
+- 当前现场彩色1920x1080原始帧约6.22MB，百兆交换机实测约2.064fps；推荐使用全千兆链路，巨帧不能替代千兆带宽。
+
+完整说明见 [RELEASE_NOTES_v3.8.3.md](RELEASE_NOTES_v3.8.3.md)。HTTP请求、TCP解算、工具偏移和机械臂控制边界保持兼容。
+
+`v3.8.2`（2026-09-17）更新内容：
+
+- `field_test/test_case.yaml` 新增 `case.live` 和 `case.base_label`；
+- 日常现场测试只需执行 `bash run_field_test.sh`，脚本自动读取实时拍照模式、安装面板标签和工件code；
+- `--live`、`--no-live`、`--base-label` 和 `--code` 继续保留为单次命令行覆盖参数；
+- 正式视觉服务、TCP解算和后台HTTP接口不受影响。
+
+`v3.8.1`（2026-09-17）更新内容：
+
+- `run_field_test` 新增 `jaka_test.return_to_capture_pose` 开关，默认 `true` 保持原有返回拍照位行为；
+- 设为 `false` 时，机械臂到达工作TCP后停止并保持在工作位，不执行退出预备位或返回拍照位；
+- 新增单次命令行覆盖参数 `--return-to-capture` 和 `--stay-at-work`，不需要反复修改YAML；
+- 正式视觉服务、TCP解算和后台HTTP接口不受影响。
+
+`v3.8.0`（2026-09-15）更新内容：
+
+- 新增一次启动即可完成整个工件标定的终端交互程序，不再反复修改YAML中的mode/step并多次运行；
+- 可按 `code` 或工件名称选择目标，支持从零标定、已有工件纠正、XYZ/RPY微调三种模式；
+- 每次启动先覆盖保存唯一的 `tool/tool_offsets.backup.yaml`，成功解算后自动校验并原子更新正式 `config/tool_offsets.yaml`；
+- 微调默认使用标准/相机参考坐标系，跟随柜体朝向，不受车辆正对、侧对或斜对柜体造成的JAKA基座方向变化影响；同时可显式选择JAKA基座坐标系；
+- 原有YAML分步骤标定入口继续保留，正式视觉服务和后台HTTP接口没有变化。
+
+`v3.7.1`（2026-09-15）更新内容：
+
+- 在热加载的 `config/tool_offsets.yaml` 新增 `target_selection.circle_refinement_enabled`；
+- `true` 时保留无YOLO颜色筛选与最大有效外圆拟合，`false` 时完全跳过拟合并直接使用请求框几何中心；
+- 开关在每次解算时重新读取，修改后下一次请求生效，不需要重启服务；
+- 旧工具配置缺少该字段时继续沿用 `workflow.yaml` 中原有的 `circle_refinement.enabled`，避免升级后行为突变；
+- `/snapshot`、`/get_tcp_pose` 和 `/motion/get_tcp_pose` 的请求与响应接口保持不变。
 
 `v3.7.0`（2026-09-14）更新内容：
 
@@ -107,6 +149,7 @@
 | `models/xuncao.pt` | YOLO模型 |
 | `field_test/` | 快照、LabelMe标注、坐标解算、JAKA只读/运动联调脚本 |
 | `tool/` | YAML驱动的三模式工具标定、记录、备份及跨平台运行入口 |
+| `tool/interactive_tool_calibration.py` | 一次运行完成工件选择、位姿读取、计算、备份和自动写回的交互标定 |
 | `datas_get/` | 独立多视角采集：点云锁定ROI三维中心、自动look-at姿态和到位校验 |
 | `calibrate_tool_offset.py` | 根据标准TCP与工具示教TCP反算 `standard_to_tool` |
 | `run_tool_calibration.sh` | Ubuntu可编辑参数式工具标定、验证和微调入口 |
@@ -146,6 +189,7 @@
 ```yaml
 target_selection:
   use_yolo: false
+  circle_refinement_enabled: true
 
 tools:
   greenbtn:
@@ -158,7 +202,7 @@ tools:
       rpy_deg: [-3.005278, -4.276208, -0.141311]
 ```
 
-`use_yolo: true` 保持原有“YOLO中心与请求框匹配”流程，请求 `code` 可以省略。`use_yolo: false` 时不调用YOLO，而是读取 `workflow.yaml` 的 `target_matching.circle_refinement`：先把请求 `target` 粗框附近的内外圆按圆心聚类，选择离粗框中心最近且符合 `target_color` 的工件组，再采用该组最大且边缘支持可靠的外圆圆心。颜色只负责筛选目标，不改变最终机械轴心。请求中的 `code` 仍负责选择具有相同 `tools.<工件>.code` 的已启用工件。每个 `code` 必须是非空字符串且在整个文件中唯一；要叠加对应工具偏移，还应保持 `pose.alignment_mode: tool`。
+`use_yolo: true` 保持原有“YOLO中心与请求框匹配”流程，请求 `code` 可以省略。`use_yolo: false` 时不调用YOLO，并由 `circle_refinement_enabled` 决定中心策略：设为 `true` 时，先把请求 `target` 粗框附近的内外圆按圆心聚类，选择离粗框中心最近且符合 `target_color` 的工件组，再采用该组最大且边缘支持可靠的外圆圆心；设为 `false` 时，完全跳过圆检测和颜色筛选，直接采用请求 `target` 的几何中心。请求中的 `code` 在两种情况下都负责选择具有相同 `tools.<工件>.code` 的已启用工件。每个 `code` 必须是非空字符串且在整个文件中唯一；要叠加对应工具偏移，还应保持 `pose.alignment_mode: tool`。
 
 `target_color` 可填写 `red`、`green`、`black` 或 `auto`。不填写等同于 `auto`；颜色证据不可靠时自动使用纯边缘结果。
 
@@ -189,7 +233,7 @@ target_matching:
     fallback_to_box_center: false
 ```
 
-黄色框/点代表请求粗框及其中心，绿色圆/点代表最终采用的最大有效外圆及机械轴心，蓝色箭头代表中心修正方向。默认 `center_mode: edge` 时不会显示洋红叉；只有启用实验性的 `weighted_centroid` 时，洋红叉才表示融合前的纯边缘圆心。`circle_refinement` 属于启动配置，修改后需要重启服务；`use_yolo`、`code`、`target_color` 和工具偏移支持热加载。
+黄色框/点代表请求粗框及其中心，绿色圆/点代表最终采用的最大有效外圆及机械轴心，蓝色箭头代表中心修正方向。默认 `center_mode: edge` 时不会显示洋红叉；只有启用实验性的 `weighted_centroid` 时，洋红叉才表示融合前的纯边缘圆心。`workflow.yaml` 内的拟合阈值和算法参数属于启动配置，修改后需要重启服务；`tool_offsets.yaml` 内的 `use_yolo`、`circle_refinement_enabled`、`code`、`target_color` 和工具偏移支持热加载。
 
 请求示例：
 
@@ -205,13 +249,13 @@ target_matching:
 
 如果文件存在YAML语法错误、缺少类别、数组不是3个有限数字或仍使用v1字段 `camera_to_tool`，本次请求会失败并且不会沿用旧偏移。修正文件后直接重试即可，不需要重启服务。`service.log` 和保存的 `result.json` 会记录本次实际使用的数值及文件SHA-256。
 
-推荐使用新的YAML分步骤标定。编辑 [tool/tool_calibration.yaml](tool/tool_calibration.yaml) 中的 `mode`、`step` 和工件信息，然后每完成一步运行：
+现场推荐直接启动一次交互式标定：
 
 ```bash
-bash tool/run_tool_calibration.sh
+bash tool/run_interactive_tool_calibration.sh
 ```
 
-模式1依次执行step 1/2/3；模式2依次执行step 1/2/3；模式3执行step 1后填写微调量，再执行step 2。脚本会连接JAKA读取当前活动TCP，但不会控制机械臂运动。完整步骤、数学含义、记录文件和自动应用开关见 [tool/README.md](tool/README.md)。根目录旧 `run_tool_calibration.sh` 仍保留，兼容原来的手动参数方式。
+程序会在同一个终端会话中列出工件并提示输入 `code`、模式和每个机械臂示教步骤。按Enter或输入yes读取当前活动TCP；程序保持运行，等待手动调整完成后再次确认。最后自动计算并写回 `config/tool_offsets.yaml`，视觉服务下一次解算热加载生效。交互程序不会发送机械臂运动指令。旧的 `tool/run_tool_calibration.sh` YAML分步骤入口和根目录手动参数入口继续保留。完整流程和坐标系说明见 [tool/README.md](tool/README.md)。
 
 ## Ubuntu 快速启动
 

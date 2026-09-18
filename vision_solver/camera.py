@@ -50,6 +50,9 @@ class CameraManager:
                     unload_openni_on_disconnect=bool(
                         self.camera_config.get(
                             "unload_openni_on_disconnect", False)),
+                    fresh_frame_timeout_s=float(
+                        self.camera_config.get(
+                            "fresh_frame_timeout_s", 3.0)),
                 )
             if not self.adapter.is_connected():
                 self.adapter.connect(str(self.camera_config.get("ip", "auto")))

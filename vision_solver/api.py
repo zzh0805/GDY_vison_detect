@@ -120,22 +120,33 @@ class VisionToolTcpSolver:
                          sorted(self.detector.class_names or ()) or "全部",
                          time.perf_counter() - step_started)
             else:
-                circle_enabled = bool(dict(
+                legacy_circle_enabled = bool(dict(
                     self.config.matching.get("circle_refinement") or {}
                 ).get("enabled", False))
+                circle_enabled = (
+                    legacy_circle_enabled
+                    if tool_offsets.circle_refinement_enabled is None
+                    else tool_offsets.circle_refinement_enabled)
+                circle_source = (
+                    "workflow_legacy_default"
+                    if tool_offsets.circle_refinement_enabled is None
+                    else "tool_offsets_hot_reload")
                 log.info(
                     "无YOLO模式已启用: 跳过YOLO启动预加载，"
-                    "圆心拟合=%s，由请求code动态选择工件，可用映射=%s",
+                    "圆心拟合=%s 开关来源=%s，"
+                    "由请求code动态选择工件，可用映射=%s",
                     circle_enabled,
+                    circle_source,
                     tool_offsets.code_to_tool)
             step_started = time.perf_counter()
             self.pose_solver = TargetPoseSolver(
                 self.calibration, self.config.pose, tool_offsets.tools)
             log.info(
                 "工具偏移配置加载: %s 类别=%d use_yolo=%s "
-                "code映射数=%d sha256=%s",
+                "circle_refinement_enabled=%s code映射数=%d sha256=%s",
                 tool_offsets.source_path, len(tool_offsets.tools),
                 tool_offsets.use_yolo,
+                tool_offsets.circle_refinement_enabled,
                 len(tool_offsets.code_to_tool),
                 tool_offsets.sha256[:12])
             cam_cfg = self.config.camera
@@ -290,7 +301,7 @@ class VisionToolTcpSolver:
                  np.asarray(request.target_corners_px).reshape(-1).tolist(),
                  base_rect)
         try:
-            # 目标模式、code映射和工具偏移均在每次解算开始时热加载。
+            # 目标模式、圆拟合开关、code映射和工具偏移均在每次解算开始时热加载。
             # 先完成code校验，再采集大图/点云，错误请求不会浪费一次拍照。
             tool_offsets = load_tool_offsets(self.tool_offsets_path)
         except (OSError, TypeError, ValueError) as exc:
@@ -385,7 +396,16 @@ class VisionToolTcpSolver:
             request_center = np.mean(corners, axis=0)
             circle_settings = dict(
                 matching.get("circle_refinement") or {})
-            circle_enabled = bool(circle_settings.get("enabled", False))
+            # v3.7.1起优先使用tool_offsets.yaml中的热加载开关。
+            # 旧工具文件缺少该字段时才沿用workflow.yaml的静态enabled，
+            # 避免升级后现有项目的目标中心策略突然改变。
+            if tool_offsets.circle_refinement_enabled is None:
+                circle_enabled = bool(
+                    circle_settings.get("enabled", False))
+                circle_switch_source = "workflow_legacy_default"
+            else:
+                circle_enabled = tool_offsets.circle_refinement_enabled
+                circle_switch_source = "tool_offsets_hot_reload"
             circle_match = None
             expected_color = "auto"
             if circle_enabled:
@@ -486,12 +506,15 @@ class VisionToolTcpSolver:
             )
             log.info(
                 "检测: 模式=%s code=%s 对应工件=%s "
+                "圆拟合=%s 开关来源=%s "
                 "原框中心=%s 选中中心=%s 距离=%.1fpx "
                 "有效解算=%d "
                 "耗时=%.1fms（未执行YOLO推理）",
                 selection_mode,
                 request.workpiece_code,
                 selected_tool,
+                circle_enabled,
+                circle_switch_source,
                 np.round(request_center, 2).tolist(),
                 np.round(selected_center, 2).tolist(),
                 center_distance,
@@ -539,7 +562,7 @@ class VisionToolTcpSolver:
                   if plane_dist is not None else float("nan")),
                  (float(ray_dist) * 1000.0
                   if ray_dist is not None else float("nan")))
-        log.info("v3.7.0求解: 目标模式=%s code=%s 类别=%s 工具=%s "
+        log.info("v3.8.3求解: 目标模式=%s code=%s 类别=%s 工具=%s "
                  "光心参考距离=%.1fmm "
                  "工具偏移xyz=%s rpy=%s 配置sha256=%s 标准TCP=%s 最终TCP=%s",
                  selection_mode,
@@ -566,6 +589,11 @@ class VisionToolTcpSolver:
             "targetSelection": {
                 "mode": selection_mode,
                 "useYolo": tool_offsets.use_yolo,
+                "circleRefinementEnabled": (
+                    None if tool_offsets.use_yolo else circle_enabled),
+                "circleRefinementSwitchSource": (
+                    None if tool_offsets.use_yolo
+                    else circle_switch_source),
                 "requestedCode": request.workpiece_code,
                 "configuredTool": (
                     selected_tool
@@ -581,6 +609,8 @@ class VisionToolTcpSolver:
                 "sourcePath": str(tool_offsets.source_path),
                 "sha256": tool_offsets.sha256,
                 "modifiedAtUnixS": tool_offsets.modified_at_unix_s,
+                "circleRefinementEnabled": (
+                    tool_offsets.circle_refinement_enabled),
                 "requestedCode": request.workpiece_code,
                 "selectedClass": observation.class_name,
                 "configuredCode": (

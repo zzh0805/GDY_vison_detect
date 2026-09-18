@@ -1,4 +1,66 @@
-# YAML分步骤工具标定
+# 工具工作位标定
+
+## 推荐：一次运行的交互式标定
+
+Ubuntu现场只需在项目根目录执行一次：
+
+```bash
+bash tool/run_interactive_tool_calibration.sh
+```
+
+程序不会控制机械臂运动，只会读取当前活动TCP。运行后按终端提示操作：
+
+1. 输入工件 `code`，例如 `9-8-1`；也可以直接输入 `tools:` 下的工件名称；
+2. 输入模式：`1`从零标定、`2`纠正已有工件、`3`微调；
+3. 把机械臂手动移动到提示位置，按Enter或输入 `yes` 读取TCP，读取后可确认或重新读取；
+4. 模式1/2会保持程序运行并等待第二次手动调整；模式3会提示输入XYZ和可选RPY增量；
+5. 程序完成刚体解算、正向校验，并自动更新 `config/tool_offsets.yaml`。视觉服务下一次检测会热加载新偏移，不需要重启。
+
+任何步骤输入 `q` 或按 `Ctrl+C` 都可取消。取消时正式工具配置不会改变。
+
+### 三种模式
+
+- 模式1：先把相机放到光心正对目标安装平面、距离50mm的标准位并读取；再把工具示教到最终工作位并读取。程序计算 `inverse(标准TCP) × 工作TCP`。
+- 模式2：先用当前偏移到达旧工作位并读取；再手动调整到新的正确工作位并读取。程序把旧工作位到新工作位的刚体变化迁移到现有工具偏移。
+- 模式3：先到达当前工作位并读取，再输入类似 `0,-1,0` 的XYZ微调量；RPY不调整时直接按Enter。
+
+### 微调坐标系与车辆朝向
+
+模式3会提示选择坐标系，直接按Enter默认选择：
+
+```text
+1 = 标准/相机参考坐标系（推荐，跟随柜体朝向）
+2 = JAKA基座坐标系（固定按基座X/Y/Z）
+```
+
+选择1时，`0,-1,0` 表示标准/相机参考系Y−1mm。该参考系跟随当次相机正对的柜体，因此车辆正对、侧对、相机朝基座 `+Y/-Y` 或斜向时，不会因为JAKA基座方向变化而把微调方向翻转。选择2时，`0,-1,0` 才严格表示JAKA基座Y−1mm。
+
+模式1和模式2使用两次完整TCP刚体变换反算偏移，只要两次记录期间车辆底座、目标柜体、活动TCP和相机/工具安装关系不变，相机朝向基座哪个方向都不会破坏标定。不能在两次读取之间移动车辆底座或柜体。
+
+### 唯一备份与恢复
+
+程序每次启动、在询问工件之前就把正式配置备份到：
+
+```text
+tool/tool_offsets.backup.yaml
+```
+
+备份固定只保留这一份，下次运行会覆盖它。最近一次成功标定记录在 `tool/interactive_tool_calibration_result.yaml`。如果需要人工恢复：
+
+```bash
+cp tool/tool_offsets.backup.yaml config/tool_offsets.yaml
+```
+
+Windows运行方式：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tool\run_interactive_tool_calibration.ps1 `
+  -Python ".\.venv\Scripts\python.exe"
+```
+
+JAKA地址和SDK设置位于 `tool/interactive_tool_calibration.yaml`，通常只在首次部署时修改。
+
+## 旧版：YAML分步骤工具标定
 
 编辑 `tool_calibration.yaml`，每完成一个机械臂姿态就运行一次：
 

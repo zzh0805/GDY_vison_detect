@@ -6,11 +6,13 @@
 #   2. 已用 run_field_capture.ps1 采集快照并记录拍照TCP；
 #   3. LabelMe 标注路径已填入 test_case.yaml 的 case.labelme_file，
 #      且 case.labelme_target_label 为目标标签。
-# 用法: powershell -ExecutionPolicy Bypass -File run_field_test.ps1 [--live] [--base-label N] [--code CODE] [--approach-mm N]
-#   --live        一步到位：实时采集当前帧拍照+检测+解算（需机械臂静止在拍照位）
-#   --base-label N 用标注中该标签的矩形作为安装面板（可选）
+# 用法: powershell -ExecutionPolicy Bypass -File run_field_test.ps1
+# 默认从field_test/test_case.yaml读取live、base_label和code。
+#   --live/--no-live 临时覆盖YAML中的实时拍照开关
+#   --base-label N 临时覆盖YAML中的安装面板标签；传0可关闭
 #   --code CODE    use_yolo=false时指定本次工件，例如9-8-1
 #   --approach-mm N 临时覆盖法向预备距离；方向由当次柜体平面自动确定
+#   --stay-at-work 到达工作位后停止，不执行退出或返回动作
 param(
     [string]$Python = "D:/anaconda3/envs/ur_odcam/python.exe"
 )

@@ -1,4 +1,5 @@
 __pycache__/
+.vscode/
 *.py[cod]
 linux_sdk_paths.env
 output/
@@ -15,3 +16,5 @@ field_test/annotations/*
 !field_test/annotations/.gitkeep
 tool/tool_calibration_record.yaml
 tool/backups/
+tool/tool_offsets.backup.yaml
+tool/interactive_tool_calibration_result.yaml

@@ -11,9 +11,11 @@ import numpy as np
 
 from common import (create_http_client, create_jaka,
                     directional_approach_pose_mm_rpy_deg,
+                    field_test_motion_waypoints,
                     jaka_deg_to_unified, load_test_case,
                     read_jaka_pose_mm_rpy_deg, read_labelme_corners,
-                    resolve_from)
+                    resolve_base_label, resolve_from,
+                    resolve_live_capture, resolve_return_to_capture_pose)
 
 
 DEFAULT_CASE = Path(__file__).resolve().parent / "test_case.yaml"
@@ -22,12 +24,17 @@ DEFAULT_CASE = Path(__file__).resolve().parent / "test_case.yaml"
 def main() -> int:
     parser = argparse.ArgumentParser(description="LabelMe现场TCP解算测试")
     parser.add_argument("--case", default=str(DEFAULT_CASE))
+    live_group = parser.add_mutually_exclusive_group()
+    live_group.add_argument(
+        "--live", dest="live", action="store_true",
+        help="覆盖YAML：实时采集当前帧拍照+检测+解算")
+    live_group.add_argument(
+        "--no-live", dest="live", action="store_false",
+        help="覆盖YAML：不实时拍照，使用最近一次快照缓存解算")
     parser.add_argument(
-        "--live", action="store_true",
-        help="一步到位：实时采集当前帧拍照+检测+解算，无需先调用/snapshot")
-    parser.add_argument(
-        "--base-label", type=int, default=0,
-        help="基座面板标签：用标注中该标签的矩形作为base（面板解算）")
+        "--base-label", default=None,
+        help=("覆盖YAML中的case.base_label；用该LabelMe标签的矩形作为"
+              "base，传0可临时关闭"))
     parser.add_argument(
         "--code", default=None,
         help=("无YOLO模式的工件编码；覆盖test_case.yaml中的case.code，"
@@ -40,6 +47,16 @@ def main() -> int:
         "--approach-x-mm", type=float, default=None,
         help=("兼容旧命令；只取绝对值作为自动法向预备距离，"
               "不再固定沿基座X进入"))
+    return_group = parser.add_mutually_exclusive_group()
+    return_group.add_argument(
+        "--return-to-capture", dest="return_to_capture_pose",
+        action="store_true",
+        help="覆盖YAML：到达工作位后退出并返回拍照位")
+    return_group.add_argument(
+        "--stay-at-work", dest="return_to_capture_pose",
+        action="store_false",
+        help="覆盖YAML：到达工作位后停止，保持在工作TCP")
+    parser.set_defaults(live=None, return_to_capture_pose=None)
     args = parser.parse_args()
     case_path, data = load_test_case(args.case)
     case = dict(data.get("case") or {})
@@ -58,18 +75,26 @@ def main() -> int:
     raw_workpiece_code = (
         args.code if args.code is not None else case.get("code"))
     workpiece_code = str(raw_workpiece_code or "").strip()
+    live_capture = resolve_live_capture(case, args.live)
+    base_label = resolve_base_label(case, args.base_label)
     # 基座面板矩形（可选）：从标注中 base-label 读，传给服务端做面板解算。
     base_rect = None
-    if args.base_label:
+    if base_label is not None:
         base_corners = read_labelme_corners(
-            labelme_path, str(args.base_label), 0)
+            labelme_path, base_label, 0)
         bx1, by1 = np.min(base_corners, axis=0)
         bx2, by2 = np.max(base_corners, axis=0)
         base_rect = {"x1": float(bx1), "y1": float(by1),
                      "x2": float(bx2), "y2": float(by2)}
+    print(
+        "现场测试请求配置: live=%s, base_label=%s"
+        % (str(live_capture).lower(),
+           base_label if base_label is not None else "未启用"))
 
     start_jaka = bool(jaka.get("start_jaka", False))
     work_jaka = bool(jaka.get("work_jaka", False))
+    return_to_capture_pose = resolve_return_to_capture_pose(
+        jaka, args.return_to_capture_pose)
     if args.approach_mm is not None and args.approach_x_mm is not None:
         raise ValueError("--approach-mm和兼容参数--approach-x-mm不能同时使用")
     if args.approach_mm is not None:
@@ -109,7 +134,7 @@ def main() -> int:
             print(f"本次请求工件code={workpiece_code}")
         result = create_http_client(data).get_tcp_pose_with_approach(
             capture_tcp_rad.tolist(), x1, y1, x2, y2,
-            base=base_rect, live=bool(args.live),
+            base=base_rect, live=live_capture,
             code=(workpiece_code or None))
 
         output_dir = case_path.parent / "output"
@@ -154,26 +179,31 @@ def main() -> int:
         print("========================================================")
 
         if work_jaka:
-            print(
-                "work_jaka=true：先移动到柜体法向预备位 "
-                f"(反退距离={approach_distance_mm:.1f}mm)，并摆好最终姿态……")
-            robot.move_linear(
-                jaka_deg_to_unified(approach_tcp_deg),
-                name="field_test_work_approach_pose")
-            print("正在沿当次柜体法向直线进入工作TCP……")
-            robot.move_linear(
-                jaka_deg_to_unified(pos_deg),
-                name="field_test_work_pose")
-            print("机器人已到达工作TCP")
-            print("正在沿相反法向原路退回同一预备位……")
-            robot.move_linear(
-                jaka_deg_to_unified(approach_tcp_deg),
-                name="field_test_work_retreat_pose")
-            print("正在从预备位返回拍照TCP……")
-            robot.move_linear(
-                jaka_deg_to_unified(capture_tcp),
-                name="field_test_return_capture_pose")
-            print("机器人已按原路返回拍照TCP")
+            messages = {
+                "field_test_work_approach_pose": (
+                    "work_jaka=true：移动到柜体法向预备位 "
+                    f"(反退距离={approach_distance_mm:.1f}mm)，并摆好最终姿态……"),
+                "field_test_work_pose": "正在沿当次柜体法向直线进入工作TCP……",
+                "field_test_work_retreat_pose": (
+                    "return_to_capture_pose=true：正在沿相反法向退回预备位……"),
+                "field_test_return_capture_pose": (
+                    "return_to_capture_pose=true：正在从预备位返回拍照TCP……"),
+            }
+            waypoints = field_test_motion_waypoints(
+                approach_tcp_deg, pos_deg, capture_tcp,
+                return_to_capture_pose)
+            for name, waypoint in waypoints:
+                print(messages[name])
+                robot.move_linear(
+                    jaka_deg_to_unified(waypoint), name=name)
+                if name == "field_test_work_pose":
+                    print("机器人已到达工作TCP")
+            if return_to_capture_pose:
+                print("机器人已按原路返回拍照TCP")
+            else:
+                print(
+                    "return_to_capture_pose=false：机器人保持在工作TCP，"
+                    "未执行退出或返回拍照位")
         else:
             print("work_jaka=false：只输出目标及预备TCP，未执行工作位运动")
     finally:

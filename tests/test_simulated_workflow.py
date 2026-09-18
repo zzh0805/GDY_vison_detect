@@ -156,14 +156,18 @@ class SimulatedWorkflowTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def write_tool_offsets(self, x_offset_mm: float = 100.0,
-                           use_yolo: bool = True) -> None:
+    def write_tool_offsets(
+            self, x_offset_mm: float = 100.0,
+            use_yolo: bool = True,
+            circle_refinement_enabled: bool | None = None) -> None:
+        target_selection = {"use_yolo": use_yolo}
+        if circle_refinement_enabled is not None:
+            target_selection["circle_refinement_enabled"] = (
+                circle_refinement_enabled)
         self.tool_offsets_path.write_text(
             yaml.safe_dump({
                 "version": 1,
-                "target_selection": {
-                    "use_yolo": use_yolo,
-                },
+                "target_selection": target_selection,
                 "tools": {
                     "panel": {
                         "code": "9-8-1",
@@ -448,6 +452,47 @@ class SimulatedWorkflowTests(unittest.TestCase):
         self.assertAlmostEqual(solved["pos"][0], 360.0, delta=15.0)
         self.assertEqual(camera.yolo_model.predict_calls, 0)
 
+    def test_circle_refinement_can_be_hot_disabled_to_use_box_center(self):
+        with self.http_service(
+                "tool", use_yolo=False,
+                circle_refinement_enabled=True,
+                camera_factory=FakeCircleCamera,
+        ) as (client, camera):
+            self.write_tool_offsets(
+                use_yolo=False, circle_refinement_enabled=True)
+            fitted = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 55, 35, 85, 65,
+                live=True, code="9-8-1")
+
+            # 同一服务进程中只改热加载工具配置，不重启服务。
+            self.write_tool_offsets(
+                use_yolo=False, circle_refinement_enabled=False)
+            boxed = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 55, 35, 85, 65,
+                live=True, code="9-8-1")
+
+        self.assertEqual(fitted["code"], 200, fitted)
+        self.assertEqual(boxed["code"], 200, boxed)
+        self.assertAlmostEqual(fitted["pos"][0], 360.0, delta=15.0)
+        self.assertTrue(np.allclose(
+            boxed["pos"], [300, 0, 950, 0, 0, 0], atol=1e-5))
+        self.assertEqual(camera.yolo_model.predict_calls, 0)
+
+    def test_hot_circle_switch_can_enable_even_if_legacy_switch_is_false(self):
+        with self.http_service(
+                "tool", use_yolo=False,
+                circle_refinement_enabled=False,
+                camera_factory=FakeCircleCamera,
+        ) as (client, _camera):
+            self.write_tool_offsets(
+                use_yolo=False, circle_refinement_enabled=True)
+            solved = client.get_tcp_pose(
+                [0, 0, 0, 0, 0, 0], 55, 35, 85, 65,
+                live=True, code="9-8-1")
+
+        self.assertEqual(solved["code"], 200, solved)
+        self.assertAlmostEqual(solved["pos"][0], 360.0, delta=15.0)
+
     def test_target_selection_mode_is_hot_reloaded(self):
         with self.http_service("tool") as (client, camera):
             first = client.get_tcp_pose(
@@ -553,6 +598,19 @@ class SimulatedWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target_color"):
             load_tool_offsets(self.tool_offsets_path)
 
+    def test_invalid_circle_refinement_hot_switch_is_rejected(self):
+        self.write_tool_offsets(use_yolo=False)
+        data = yaml.safe_load(
+            self.tool_offsets_path.read_text(encoding="utf-8"))
+        data["target_selection"]["circle_refinement_enabled"] = "false"
+        self.tool_offsets_path.write_text(
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+            encoding="utf-8")
+
+        with self.assertRaisesRegex(
+                ValueError, "circle_refinement_enabled"):
+            load_tool_offsets(self.tool_offsets_path)
+
     def test_v32_tool_file_without_target_selection_defaults_to_yolo(self):
         data = yaml.safe_load(
             self.tool_offsets_path.read_text(encoding="utf-8"))
@@ -562,6 +620,7 @@ class SimulatedWorkflowTests(unittest.TestCase):
             encoding="utf-8")
         snapshot = load_tool_offsets(self.tool_offsets_path)
         self.assertTrue(snapshot.use_yolo)
+        self.assertIsNone(snapshot.circle_refinement_enabled)
 
     def test_tool_offset_file_is_reloaded_without_restarting_service(self):
         with self.http_service("tool") as (client, camera):
