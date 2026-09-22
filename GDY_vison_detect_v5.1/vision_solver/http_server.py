@@ -1,0 +1,315 @@
+# -*- coding: utf-8 -*-
+"""机械臂末端视觉HTTP服务，提供拍照和TCP解算接口。"""
+from __future__ import annotations
+
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlsplit
+
+from .logging_utils import get_logger
+from .preview import PreviewService
+
+
+MAX_REQUEST_BODY = 1024 * 1024
+
+log = get_logger()
+
+
+def _round_pos(pos) -> str:
+    """把返回的 pos 列表格式化为简洁字符串（容错 None/非列表）。"""
+    if not isinstance(pos, (list, tuple)):
+        return str(pos)
+    try:
+        return "[" + ", ".join(f"{float(v):.3f}" for v in pos) + "]"
+    except (TypeError, ValueError):
+        return str(pos)
+
+
+class _ReusableThreadingHttpServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class VisionHttpServer:
+    def __init__(self, protocol: Any, host: str, port: int):
+        self.protocol = protocol
+        self.host = str(host)
+        self.port = int(port)
+        self.preview = PreviewService(getattr(protocol.solver, "camera", None),
+                                      getattr(protocol.solver.config, "data", {}).get("preview", {}))
+        self.snapshot_directory = protocol.solver.config.resolve_path(
+            protocol.solver.config.http.get(
+                "snapshot_directory", "../shared_images"))
+        self._stop_lock = threading.Lock()
+        self._stopped = False
+        self._stop_complete = threading.Event()
+        self._server = _ReusableThreadingHttpServer(
+            (self.host, self.port), self._handler_class())
+
+    @property
+    def server_address(self):
+        return self._server.server_address
+
+    def _handler_class(self):
+        protocol = self.protocol
+        snapshot_directory = self.snapshot_directory.resolve()
+        preview = self.preview
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, format_string, *args):
+                log.debug("HTTP %s - %s", self.address_string(),
+                           format_string % args)
+
+            def _send_json(self, payload: dict, http_status: int = 200):
+                body = json.dumps(
+                    payload, ensure_ascii=False,
+                    separators=(",", ":")).encode("utf-8")
+                self.send_response(http_status)
+                self.send_header(
+                    "Content-Type", "application/json;charset=UTF-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _json_body(self):
+                raw_length = self.headers.get("Content-Length", "0")
+                try:
+                    length = int(raw_length)
+                except ValueError as exc:
+                    raise ValueError("Content-Length无效") from exc
+                if length <= 0:
+                    raise ValueError("请求体不能为空")
+                if length > MAX_REQUEST_BODY:
+                    raise ValueError("请求体过大")
+                raw = self.rfile.read(length)
+                try:
+                    return json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"JSON解析失败: {exc}") from exc
+
+            def _request_base_url(self) -> str:
+                host = str(self.headers.get("Host") or "").strip()
+                if not host or any(char in host for char in "\r\n/\\"):
+                    return ""
+                return f"http://{host}"
+
+            def _send_snapshot_file(self, request_path: str) -> None:
+                prefix = "/snapshots/"
+                encoded_name = request_path[len(prefix):]
+                file_name = unquote(encoded_name)
+                if (not file_name or file_name in (".", "..") or
+                        "/" in file_name or "\\" in file_name or
+                        Path(file_name).name != file_name or
+                        Path(file_name).suffix.lower() not in
+                        (".jpg", ".jpeg")):
+                    self._send_json(
+                        {"code": 404, "status": "快照不存在"}, 404)
+                    return
+                image_path = (snapshot_directory / file_name).resolve()
+                if (image_path.parent != snapshot_directory or
+                        not image_path.is_file()):
+                    self._send_json(
+                        {"code": 404, "status": "快照不存在"}, 404)
+                    return
+                size = image_path.stat().st_size
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                with image_path.open("rb") as source:
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+
+            def do_GET(self):
+                path = urlsplit(self.path).path
+                started = time.perf_counter()
+                client = self.address_string()
+                try:
+                    if path == "/preview/status":
+                        self._send_json({"code": 200, **preview.status()})
+                        return
+                    if path == "/preview/rgb.mjpg":
+                        self._send_preview()
+                        return
+                    if path.startswith("/snapshots/"):
+                        self._send_snapshot_file(path)
+                        log.info(
+                            "HTTP GET %s %s 耗时=%.1fms",
+                            path, client,
+                            (time.perf_counter() - started) * 1000.0)
+                        return
+                    self._send_json(
+                        {"code": 404, "status": f"未知接口{path}"}, 404)
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError) as exc:
+                    log.warning(
+                        "HTTP %s 下载快照时客户端已断开 %s: %s",
+                        client, path, exc)
+                except Exception as exc:
+                    log.error("HTTP GET %s 处理异常 %s: %s",
+                              client, path, exc, exc_info=True)
+                    self._send_json({"code": 500, "status": str(exc)}, 500)
+
+            def _send_preview(self):
+                if not preview.status()["active"]:
+                    self._send_json({"code": 409, "status": "请先调用 /preview/start"}, 409)
+                    return
+                if not preview.clients.acquire(blocking=False):
+                    self._send_json({"code": 429, "status": "预览客户端数量已达上限"}, 429)
+                    return
+                preview.subscriber_added()
+                try:
+                    self.connection.settimeout(preview.config["socket_timeout_s"])
+                    self.send_response(200)
+                    self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    previous = None
+                    while preview.status()["active"]:
+                        item = preview.next_frame(previous)
+                        if item is None:
+                            continue
+                        previous, jpeg, info = item
+                        header = (f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(jpeg)}\r\n"
+                                  f"X-Sequence: {info.get('sequence', 0)}\r\n"
+                                  f"X-Acquisition-Fps: {info.get('acquisition_fps', 0):.3f}\r\n\r\n")
+                        self.wfile.write(header.encode("ascii"))
+                        self.wfile.write(jpeg)
+                        self.wfile.write(b"\r\n")
+                        self.wfile.flush()
+                except (OSError, TimeoutError) as exc:
+                    log.info("预览客户端断开: %s", exc)
+                finally:
+                    self.close_connection = True
+                    preview.clients.release()
+                    preview.subscriber_removed()
+
+            def do_POST(self):
+                path = urlsplit(self.path).path.rstrip("/") or "/"
+                started = time.perf_counter()
+                client = self.address_string()
+                try:
+                    if path == "/preview/start":
+                        result = preview.start()
+                        self._send_json({"code": 200, **result, "stream_path": "/preview/rgb.mjpg"})
+                        return
+                    if path == "/preview/stop":
+                        payload = self._json_body()
+                        self._send_json({"code": 200, **preview.stop(payload.get("session"))})
+                        return
+                    if path == "/snapshot":
+                        result = protocol.snapshot(
+                            request_base_url=self._request_base_url())
+                        self._send_json(result)
+                        log.info("HTTP /snapshot %s 耗时=%.1fms code=%s",
+                                 client, (time.perf_counter() - started) * 1000.0,
+                                 result.get("code"))
+                        return
+                    if path == "/capture_color":
+                        result = protocol.capture_color(self._json_body())
+                        self._send_json(result)
+                        log.info("HTTP /capture_color %s 耗时=%.1fms code=%s",
+                                 client,
+                                 (time.perf_counter() - started) * 1000.0,
+                                 result.get("code"))
+                        return
+                    if path == "/datas_get/reference":
+                        result = protocol.capture_dataset_reference(
+                            self._json_body())
+                        self._send_json(result)
+                        log.info(
+                            "HTTP /datas_get/reference %s 耗时=%.1fms code=%s",
+                            client, (time.perf_counter() - started) * 1000.0,
+                            result.get("code"))
+                        return
+                    if path == "/motion/get_tcp_pose":
+                        result = protocol.get_tcp_pose_with_approach(
+                            self._json_body())
+                        self._send_json(result)
+                        code = result.get("code")
+                        if code == 200:
+                            log.info(
+                                "HTTP /motion/get_tcp_pose %s 耗时=%.1fms "
+                                "code=200 pos=%s direction=%s",
+                                client,
+                                (time.perf_counter() - started) * 1000.0,
+                                _round_pos(result.get("pos")),
+                                result.get("approachDirectionBase"))
+                        else:
+                            log.error(
+                                "HTTP /motion/get_tcp_pose %s 耗时=%.1fms "
+                                "code=%s status=%s",
+                                client,
+                                (time.perf_counter() - started) * 1000.0,
+                                code, result.get("status"))
+                        return
+                    if path == "/get_tcp_pose":
+                        result = protocol.get_tcp_pose(self._json_body())
+                        self._send_json(result)
+                        code = result.get("code")
+                        if code == 200:
+                            log.info("HTTP /get_tcp_pose %s 耗时=%.1fms code=200 "
+                                     "pos=%s", client,
+                                     (time.perf_counter() - started) * 1000.0,
+                                     _round_pos(result.get("pos")))
+                        else:
+                            log.error("HTTP /get_tcp_pose %s 耗时=%.1fms code=%s "
+                                      "status=%s", client,
+                                      (time.perf_counter() - started) * 1000.0,
+                                      code, result.get("status"))
+                        return
+                    self._send_json(
+                        {"code": 404, "status": f"未知接口{path}"}, 404)
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError) as exc:
+                    # 客户端已超时或主动关闭连接，此时不能再次向同一套接字
+                    # 发送500响应；服务端任务和后续请求不受影响。
+                    log.warning(
+                        "HTTP %s 客户端已断开 %s: %s，耗时=%.1fms",
+                        client, path, exc,
+                        (time.perf_counter() - started) * 1000.0)
+                except Exception as exc:
+                    # 单个HTTP处理器异常不能终止长期视觉服务。
+                    log.error("HTTP %s 处理异常 %s: %s",
+                              client, path, exc, exc_info=True)
+                    self._send_json({"code": 500, "status": str(exc)})
+
+        return Handler
+
+    def serve_forever(self) -> None:
+        address = self.server_address
+        log.info("视觉HTTP服务已监听 %s:%s", address[0], address[1])
+        self._server.serve_forever(poll_interval=0.5)
+
+    def stop(self) -> None:
+        with self._stop_lock:
+            if self._stopped:
+                owner = False
+            else:
+                self._stopped = True
+                owner = True
+        if not owner:
+            self._stop_complete.wait(timeout=5.0)
+            return
+        try:
+            self._server.shutdown()
+            self._server.server_close()
+            self.preview.stop()
+        finally:
+            self._stop_complete.set()
+
+    def stop_async(self) -> None:
+        threading.Thread(target=self.stop, daemon=True).start()

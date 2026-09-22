@@ -1,0 +1,378 @@
+# -*- coding: utf-8 -*-
+"""固定主配置与可热加载工具偏移的读取、校验和路径解析。"""
+from __future__ import annotations
+
+import hashlib
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Mapping, Sequence
+from urllib.parse import urlsplit
+
+import yaml
+
+
+def _mapping(value: Any, name: str) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError(f"配置{name}必须是字典")
+    return dict(value)
+
+
+def _finite_triplet(value: Any, name: str) -> list[float]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError(f"{name}必须是3个数字")
+    if len(value) != 3:
+        raise ValueError(f"{name}必须是3个数字")
+    try:
+        result = [float(item) for item in value]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name}必须是3个数字") from exc
+    if not all(math.isfinite(item) for item in result):
+        raise ValueError(f"{name}不能包含NaN/Inf")
+    return result
+
+
+def _validate_tools(value: Any) -> Dict[str, Any]:
+    tools = _mapping(value, "tools")
+    for raw_class_name, raw_tool in tools.items():
+        if not isinstance(raw_class_name, str):
+            raise ValueError("tools中的类别名称必须是字符串")
+        class_name = str(raw_class_name).strip()
+        if not class_name:
+            raise ValueError("tools中的类别名称不能为空")
+        tool = _mapping(raw_tool, f"tools.{class_name}")
+        if "camera_to_tool" in tool:
+            raise ValueError(
+                f"tools.{class_name}.camera_to_tool是v1字段，"
+                "请迁移为standard_to_tool")
+        if "enabled" in tool and not isinstance(tool["enabled"], bool):
+            raise ValueError(f"tools.{class_name}.enabled必须是true或false")
+        if "standard_to_tool" not in tool:
+            raise ValueError(f"tools.{class_name}缺少standard_to_tool")
+        transform = _mapping(
+            tool.get("standard_to_tool"),
+            f"tools.{class_name}.standard_to_tool")
+        _finite_triplet(
+            transform.get("xyz_mm"),
+            f"tools.{class_name}.standard_to_tool.xyz_mm")
+        _finite_triplet(
+            transform.get("rpy_deg"),
+            f"tools.{class_name}.standard_to_tool.rpy_deg")
+        if "standoff_mm" in tool:
+            try:
+                standoff_mm = float(tool["standoff_mm"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"tools.{class_name}.standoff_mm必须是数字") from exc
+            if not math.isfinite(standoff_mm) or standoff_mm < 0.0:
+                raise ValueError(
+                    f"tools.{class_name}.standoff_mm必须是非负有限数字")
+        if "code" in tool:
+            if not isinstance(tool["code"], str):
+                raise ValueError(f"tools.{class_name}.code必须是字符串")
+            if not tool["code"].strip():
+                raise ValueError(f"tools.{class_name}.code不能为空")
+        if "target_color" in tool:
+            if not isinstance(tool["target_color"], str):
+                raise ValueError(
+                    f"tools.{class_name}.target_color必须是字符串")
+            target_color = tool["target_color"].strip().lower()
+            if target_color not in ("auto", "red", "green", "black"):
+                raise ValueError(
+                    f"tools.{class_name}.target_color必须是"
+                    "auto、red、green或black")
+    return tools
+
+
+def _build_code_to_tool(tools: Mapping[str, Any]) -> Dict[str, str]:
+    """建立无YOLO模式使用的外部code到工具类别映射。"""
+    result: Dict[str, str] = {}
+    for class_name, raw_tool in tools.items():
+        tool = _mapping(raw_tool, f"tools.{class_name}")
+        if "code" not in tool:
+            continue
+        code = str(tool["code"]).strip()
+        previous = result.get(code)
+        if previous is not None:
+            raise ValueError(
+                f"tools中的code必须唯一: {code!r}同时用于"
+                f"{previous!r}和{class_name!r}")
+        result[code] = class_name
+    return result
+
+
+@dataclass(frozen=True)
+class ToolOffsetsSnapshot:
+    """一次完整读取并校验后的工具偏移快照。"""
+
+    source_path: Path
+    tools: Dict[str, Any]
+    use_yolo: bool
+    circle_refinement_enabled: bool | None
+    code_to_tool: Dict[str, str]
+    sha256: str
+    modified_at_unix_s: float
+
+
+def load_tool_offsets(path: Any) -> ToolOffsetsSnapshot:
+    """读取独立工具配置；每次调用都重新访问磁盘，不使用内存缓存。"""
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"工具偏移配置不存在: {source}")
+
+    # 编辑器保存文件时可能先写临时内容。若读取期间文件发生变化，重读一次；
+    # 仍不稳定则让本次解算失败，禁止悄悄使用旧偏移。
+    payload = b""
+    after = None
+    for _attempt in range(2):
+        before = source.stat()
+        payload = source.read_bytes()
+        after = source.stat()
+        if (before.st_mtime_ns, before.st_size) == (
+                after.st_mtime_ns, after.st_size):
+            break
+    else:
+        raise ValueError(f"工具偏移配置正在被修改，请重新执行本次解算: {source}")
+
+    try:
+        data = yaml.safe_load(payload.decode("utf-8-sig")) or {}
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"工具偏移配置不是有效UTF-8 YAML: {source}: {exc}") from exc
+    if not isinstance(data, Mapping):
+        raise ValueError(f"工具偏移配置顶层必须是字典: {source}")
+    version = data.get("version", 1)
+    if int(version) != 1:
+        raise ValueError(f"工具偏移配置version只支持1，实际为{version!r}")
+    tools = _validate_tools(data.get("tools"))
+    code_to_tool = _build_code_to_tool(tools)
+    target_selection = _mapping(
+        data.get("target_selection"), "target_selection")
+    use_yolo = target_selection.get("use_yolo", True)
+    if not isinstance(use_yolo, bool):
+        raise ValueError("target_selection.use_yolo必须是true或false")
+    circle_refinement_enabled = target_selection.get(
+        "circle_refinement_enabled")
+    if circle_refinement_enabled is not None and not isinstance(
+            circle_refinement_enabled, bool):
+        raise ValueError(
+            "target_selection.circle_refinement_enabled必须是true或false")
+    if not use_yolo and not any(
+            bool(tools[class_name].get("enabled", True))
+            for class_name in code_to_tool.values()):
+        raise ValueError(
+            "关闭YOLO时至少一个已启用的tools工件必须配置唯一code")
+    return ToolOffsetsSnapshot(
+        source_path=source,
+        tools=tools,
+        use_yolo=use_yolo,
+        circle_refinement_enabled=circle_refinement_enabled,
+        code_to_tool=code_to_tool,
+        sha256=hashlib.sha256(payload).hexdigest(),
+        modified_at_unix_s=float(after.st_mtime),
+    )
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    source_path: Path
+    data: Dict[str, Any]
+
+    @property
+    def root(self) -> Path:
+        return self.source_path.parent
+
+    def section(self, name: str) -> Dict[str, Any]:
+        return _mapping(self.data.get(name), name)
+
+    def resolve_path(self, value: Any, *, must_exist: bool = False) -> Path:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("配置路径不能为空")
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = self.root / path
+        path = path.resolve()
+        if must_exist and not path.exists():
+            raise FileNotFoundError(f"配置文件不存在: {path}")
+        return path
+
+    @property
+    def camera(self) -> Dict[str, Any]:
+        return self.section("camera")
+
+    @property
+    def calibration(self) -> Dict[str, Any]:
+        return self.section("calibration")
+
+    @property
+    def yolo(self) -> Dict[str, Any]:
+        return self.section("yolo")
+
+    @property
+    def matching(self) -> Dict[str, Any]:
+        return self.section("target_matching")
+
+    @property
+    def plane(self) -> Dict[str, Any]:
+        return self.section("plane_fitting")
+
+    @property
+    def pose(self) -> Dict[str, Any]:
+        return self.section("pose")
+
+    @property
+    def annotation(self) -> Dict[str, Any]:
+        return self.section("annotation_capture")
+
+    @property
+    def system(self) -> Dict[str, Any]:
+        return self.section("system")
+
+    @property
+    def network(self) -> Dict[str, Any]:
+        return self.section("network")
+
+    @property
+    def http(self) -> Dict[str, Any]:
+        return self.section("http")
+
+    @property
+    def tool_offsets_path(self) -> Path:
+        settings = self.section("tool_offsets")
+        return self.resolve_path(
+            settings.get("file", "tool_offsets.yaml"), must_exist=True)
+
+    @property
+    def tools(self) -> Dict[str, Any]:
+        """兼容只读入口；每次访问都会从独立文件重新加载。"""
+        return load_tool_offsets(self.tool_offsets_path).tools
+
+    def validate(self) -> None:
+        from handeye_calib.native_settings import native_settings
+        from .preview import preview_settings
+        native_settings(self.camera.get("native"))
+        preview_settings(self.section("preview"))
+        self.resolve_path(
+            self.camera.get("calibration_file"), must_exist=True)
+        self.resolve_path(
+            self.calibration.get("handeye_result_file"), must_exist=True)
+        self.resolve_path(self.yolo.get("model_file"), must_exist=True)
+        mode = str(self.pose.get("alignment_mode", "camera_center"))
+        if mode not in ("camera_center", "tool"):
+            raise ValueError("pose.alignment_mode只支持camera_center或tool")
+        if int(self.pose.get("pipeline_version", 0)) != 2:
+            raise ValueError("v2要求pose.pipeline_version=2，禁止误用旧坐标链配置")
+        if float(self.pose.get("standoff_mm", 50.0)) < 0.0:
+            raise ValueError("pose.standoff_mm不能小于0")
+        if "tools" in self.data:
+            raise ValueError(
+                "v3不再从workflow.yaml读取tools；"
+                "请移动到tool_offsets.file指定的独立文件")
+        load_tool_offsets(self.tool_offsets_path)
+        if int(self.matching.get("source_image_width", 1920)) <= 0 or \
+                int(self.matching.get("source_image_height", 1080)) <= 0:
+            raise ValueError("原图像尺寸必须大于0")
+        circle_settings = _mapping(
+            self.matching.get("circle_refinement"),
+            "target_matching.circle_refinement")
+        from .circle_center_refiner import (
+            validate_circle_refinement_settings)
+        validate_circle_refinement_settings(circle_settings)
+        http = self.http
+        port = int(http.get("listen_port", 48051))
+        if port <= 0 or port > 65535:
+            raise ValueError("http.listen_port必须在1~65535之间")
+        if float(http.get("request_timeout_s", 15.0)) <= 0.0:
+            raise ValueError("http.request_timeout_s必须大于0")
+        for delay_name, default_value in (
+                ("snapshot_delay_s", 5.0),
+                ("live_capture_delay_s", 4.0)):
+            delay_s = float(http.get(delay_name, default_value))
+            if not math.isfinite(delay_s) or delay_s < 0.0:
+                raise ValueError(f"http.{delay_name}必须是非负有限数字")
+        if float(http.get("snapshot_cache_ttl_s", 300.0)) <= 0.0:
+            raise ValueError("http.snapshot_cache_ttl_s必须大于0")
+        self.resolve_path(http.get("snapshot_directory", "../shared_images"))
+        snapshot_delivery = str(
+            http.get("snapshot_delivery", "http") or "http"
+        ).strip().lower()
+        if snapshot_delivery not in ("http", "minio"):
+            raise ValueError(
+                "http.snapshot_delivery只支持http或minio")
+        public_base_url = str(
+            http.get("snapshot_public_base_url", "") or "").strip()
+        if public_base_url:
+            parsed_url = urlsplit(public_base_url)
+            if (parsed_url.scheme not in ("http", "https") or
+                    not parsed_url.netloc or
+                    parsed_url.path not in ("", "/") or
+                    parsed_url.query or parsed_url.fragment):
+                raise ValueError(
+                    "http.snapshot_public_base_url必须是仅包含协议、"
+                    "主机和可选端口的HTTP(S)地址")
+        if snapshot_delivery == "minio":
+            if not bool(http.get("save_snapshot", True)):
+                raise ValueError(
+                    "MinIO发布要求http.save_snapshot=true")
+            minio = _mapping(
+                http.get("snapshot_minio"), "http.snapshot_minio")
+            endpoint = str(minio.get("endpoint") or "").strip()
+            endpoint_url = urlsplit(endpoint)
+            if (endpoint_url.scheme not in ("http", "https") or
+                    not endpoint_url.netloc or
+                    endpoint_url.path not in ("", "/") or
+                    endpoint_url.query or endpoint_url.fragment):
+                raise ValueError(
+                    "http.snapshot_minio.endpoint必须是仅包含协议、"
+                    "主机和可选端口的HTTP(S)地址")
+            bucket = str(minio.get("bucket") or "").strip()
+            if not bucket or "/" in bucket or "\\" in bucket:
+                raise ValueError(
+                    "http.snapshot_minio.bucket必须是有效的桶名")
+            prefix = str(
+                minio.get("object_prefix") or "vision/snapshots").strip()
+            if ".." in Path(prefix).parts or "\\" in prefix:
+                raise ValueError(
+                    "http.snapshot_minio.object_prefix不能包含..或反斜杠")
+            for env_name in ("access_key_env", "secret_key_env"):
+                if not str(minio.get(env_name) or "").strip():
+                    raise ValueError(
+                        f"http.snapshot_minio.{env_name}不能为空")
+            url_mode = str(
+                minio.get("url_mode") or "public").strip().lower()
+            if url_mode not in ("public", "presigned"):
+                raise ValueError(
+                    "http.snapshot_minio.url_mode只支持public或presigned")
+            if url_mode == "public":
+                minio_public_url = str(
+                    minio.get("public_base_url") or endpoint).strip()
+                parsed_public_url = urlsplit(minio_public_url)
+                if (parsed_public_url.scheme not in ("http", "https") or
+                        not parsed_public_url.netloc or
+                        parsed_public_url.path not in ("", "/") or
+                        parsed_public_url.query or
+                        parsed_public_url.fragment):
+                    raise ValueError(
+                        "http.snapshot_minio.public_base_url必须是仅包含"
+                        "协议、主机和可选端口的HTTP(S)地址")
+            else:
+                expiry_s = int(
+                    minio.get("presigned_expiry_s", 86400))
+                if expiry_s <= 0 or expiry_s > 7 * 24 * 60 * 60:
+                    raise ValueError(
+                        "http.snapshot_minio.presigned_expiry_s必须在"
+                        "1到604800秒之间")
+
+
+def load_config(path: Any) -> AppConfig:
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"主配置不存在: {source}")
+    data = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, Mapping):
+        raise ValueError("主配置顶层必须是字典")
+    config = AppConfig(source, dict(data))
+    config.validate()
+    return config

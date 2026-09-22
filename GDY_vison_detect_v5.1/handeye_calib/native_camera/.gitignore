@@ -1,0 +1,6 @@
+*.so
+*.so.new
+sdk_location.json
+native_property_backup.txt
+native_property_backup.txt.tmp
+__pycache__/

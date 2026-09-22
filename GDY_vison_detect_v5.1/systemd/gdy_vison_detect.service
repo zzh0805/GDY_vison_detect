@@ -1,0 +1,32 @@
+# 部署到新平台时需要修改 3 处：
+#   ① User                          → 新平台用户名
+#   ② WorkingDirectory / ExecStart / StandardOutput 的绝对路径 → 新平台项目目录
+#   ③ Environment=PATH              → 新平台 conda 环境路径（systemd 的 PATH 不含 conda，
+#                                      不加这行 load_sdk_env.sh 激活不了环境，会用错 Python）
+# 安装：
+#   sudo cp systemd/gdy_vison_detect.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now gdy_vison_detect.service
+
+[Unit]
+Description=GDY High/Low Voltage Visual Detection Service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=nvidia
+WorkingDirectory=/home/nvidia/software/GDY_vison_detect_v5
+# 必须包含 conda 环境与 conda 基础目录，保证 load_sdk_env.sh 能激活 ur_odcam。
+Environment="PATH=/home/nvidia/miniconda3/envs/ur_odcam/bin:/home/nvidia/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/bin/bash /home/nvidia/software/GDY_vison_detect_v5/run_service.sh
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGTERM
+# 日志同时落盘到项目内 service.log；也可用 journalctl -u gdy_vison_detect.service -f 查看。
+StandardOutput=append:/home/nvidia/software/GDY_vison_detect_v5/service.log
+StandardError=append:/home/nvidia/software/GDY_vison_detect_v5/service.log
+
+[Install]
+WantedBy=multi-user.target

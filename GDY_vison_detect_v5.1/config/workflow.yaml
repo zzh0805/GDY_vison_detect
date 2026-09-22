@@ -1,0 +1,204 @@
+system:
+  initialization_timeout_s: 60
+  task_timeout_s: 90
+  output_directory: ../output
+  # 检测(/get_tcp_pose)流程保存开关：
+  save_report: true        # 检测保存 result.json 报告
+  save_debug_image: true   # 检测保存 detection_overlay.png 检测图（含YOLO框/平面标注）
+  save_point_cloud: false  # 检测保存点云 ply
+  # 后台运行日志（按天滚动，UTF-8，保留最近 N 天）。排障看 service.log：
+  # 生命周期/每次请求/快照/检测匹配/几何质量(深度源/RMS)/求解/错误traceback。
+  log:
+    enabled: true          # 总开关
+    level: INFO            # DEBUG 可看逐框检测与HTTP访问细节；线上用 INFO
+    file: ../service.log   # 相对项目根（run_service 默认覆盖为项目内 service.log）
+    # 保留最近7天：每次服务启动（开机自启后）自动扫描并删除超过7天的旧日志；
+    # 运行中每天0点滚动新文件（service.log.2026-08-30 ...）并同样只保留7天。
+    retention_days: 7
+    console: true          # 同时输出到控制台（nohup 重定向时也进 service.log）
+
+http:
+  listen_host: 0.0.0.0
+  listen_port: 48051
+  snapshot_directory: ../shared_images
+  # minio：拍照后上传对象存储，path返回MinIO URL；http：由视觉服务提供下载。
+  snapshot_delivery: minio
+  # snapshot_delivery=http时可填写固定外部地址；留空则按请求Host自动生成。
+  snapshot_public_base_url: ""
+  snapshot_minio:
+    endpoint: "http://192.168.16.231:9000"
+    bucket: test
+    object_prefix: vision/snapshots
+    # public返回稳定对象URL，要求bucket/prefix允许后台读取；
+    # 如果桶为私有，可改为presigned并设置有效期。
+    url_mode: public
+    public_base_url: "http://192.168.16.231:9000"
+    presigned_expiry_s: 86400
+    delete_local_after_upload: true
+    # 凭据只从环境变量读取，禁止把真实密钥写入本YAML或提交Git。
+    access_key_env: GDY_MINIO_ACCESS_KEY
+    secret_key_env: GDY_MINIO_SECRET_KEY
+  # v5.1按请求清理两路SDK缓存后软触发，不额外固定等待4秒。
+  # 机械臂到位和稳定仍由上位流程负责；预览不触发机器人动作。
+  snapshot_delay_s: 0
+  live_capture_delay_s: 0
+  # 快照是否保存图片到磁盘（默认开；关掉则/snapshot不落盘）。
+  save_snapshot: true
+  client_idle_timeout_s: 60  # 单次任务超时（live 实时采集含相机取帧，帧率低，需放宽）。
+  request_timeout_s: 60
+camera:
+  type: surfacepro50
+  ip: "192.168.16.122"
+  calibration_file: ../calibration/chishine_192_168_16_122_calibration.yml
+  python_path: ""
+  openni_redist: ""
+  show_driver_frame_output: false
+  unload_openni_on_disconnect: false
+  # 旧适配器兼容字段；v5.1原生超时由下面capture_timeout_ms控制。
+  fresh_frame_timeout_s: 3.0
+  native:
+    capture_timeout_ms: 3000
+    preview_read_timeout_ms: 100  # 单次SDK读取等待上限，不是目标帧率
+    startup_quiet_reads: 3
+    startup_max_reads: 60
+    memory_limit_mb: 2048        # 仅C++相机进程RSS+Swap，不含YOLO
+    close_timeout_s: 8
+    # null=不改变相机原有参数；填写后关闭对应自动曝光，并校验/读回。
+    # 单位提示：SDK 3.2.229 的 hpp/Types.hpp 在同一行把 uiExposureTime 的中文写成“毫秒”、
+    # 英文写成“us”，FAQ 2.7 写微秒。首次配置前必须先看日志里的范围读回再定单位，宁可报错不可猜。
+    rgb_exposure_us: null        # 例如10000；不是标准EXPOSURE刻度（标准刻度是平台映射值）
+    rgb_gain: null               # 例如1，实际范围由相机查询
+    depth_exposure: null        # 深度标准属性；SDK注明范围3000~60000微秒，必须小于帧时间
+    depth_frame_time: null      # 必须大于depth_exposure（FAQ 2.4：单帧深度≈帧时间×18）
+    depth_gain: null            # SDK注明范围1~16，高精度建议≤3
+    # 默认保留已验证v5的SDK配对默认值。启用后显式设置并读回，失败不静默忽略。
+    # v5.1.1 拍照已改为单流getFrame（不再用getPairedFrame），该参数只对旧配对接口有意义，
+    # 开关保留用于实机对比。
+    match_enabled: false
+    match_threshold_ms: 60
+    rgb_offset_ms: 0
+    rgb_after_depth: false
+    # warn=无效时间戳/原始时差过大记录告警但仍返回；strict=拒绝该次拍照。
+    # 这不是硬同步保证；raw时差检查不应用SDK offset，避免把补偿误认为同时曝光。
+    timestamp_policy: warn
+    # false=推流只恢复RGB单流，深度保持暂停（帧率/内存/SDK负担最小）。
+    # true=推流同时恢复深度并循环排空（仅在实测需要时开启）。
+    preview_with_depth: false
+    # 拍照时彩色单流取帧超时；深度用上面的 capture_timeout_ms。
+    rgb_read_timeout_ms: 500
+    # 清帧后"排空到超时"：正常（流已暂停）只需付一次超时；达到 drain_max_frames 说明流仍在
+    # 出帧，直接报错而不是把旧帧交给业务。
+    drain_timeout_ms: 100
+    drain_max_frames: 10
+    # 推流期间周期性清空SDK帧队列的兜底（0=关闭）。
+    periodic_clear_s: 60
+    # worker 定期打印 RSS/Swap 到日志，便于长时间待机的内存趋势验收（0=关闭）。
+    memory_report_s: 300
+
+preview:
+  enabled: true
+  publish_fps: 15             # JPEG发布上限；实际采集帧率由硬件决定
+  jpeg_quality: 85
+  max_clients: 2
+  max_session_s: 600          # 自动停止预览并恢复触发待机，防止无人使用一直取流
+  stale_after_s: 3            # 旧预览不反复发送；不改变原识别接口的行为
+  socket_timeout_s: 10        # 慢客户端超时断开，不堆积帧
+  record_seconds: 30
+  record_fps: 15              # MP4固定时间轴帧率，不冒充相机实测fps
+  record_codec: mp4v
+  output_directory: ../preview_recordings
+
+calibration:
+  handeye_result_file: ../calibration/handeye_result.json
+  require_accepted: true
+
+yolo:
+  model_file: ../models/best.pt
+  confidence: 0.5
+  iou: 0.7
+  device: ""
+  max_detections: 100
+  load_model_at_start: true
+  # 留空表示保留YOLO模型返回的全部类别。
+  class_names: []
+
+target_matching:
+  # 后台四角点所属的原始彩色图尺寸。
+  source_image_width: 1920
+  source_image_height: 1080
+  prefer_center_inside_polygon: true
+  # 2026-08-29: 提到500以匹配第二工件konb1标注框与YOLO中心偏差(~364px)。
+  max_match_distance_px: 500
+  # use_yolo=false时，在请求target粗框附近用灰度边缘拟合圆心。
+  # 先选离原框中心最近的同心圆组，再用该组最大有效外圆的圆心。
+  # 这样不会因按钮/旋钮的内圈边缘更清晰而选到偏移的内圆。
+  circle_refinement:
+    enabled: true
+    expand_ratio: 0.45
+    min_score: 0.35
+    # 半径范围相对于原始target粗框较短边，而不是扩展后的搜索区域。
+    min_radius_ratio: 0.08
+    max_radius_ratio: 0.75
+    min_edge_support: 0.55
+    radius_band_count: 7
+    center_cluster_tolerance_ratio: 0.18
+    outer_circle_min_support_ratio: 0.65
+    # 颜色辅助红/绿/黑目标的候选选择；失败时回退纯边缘外圆。
+    color_fusion:
+      enabled: true
+      # edge最稳：颜色只负责选目标，机械轴心保持最大外圆中心。
+      # weighted_centroid仅供特殊圆形色块试验，不适合带手柄的旋钮。
+      center_mode: edge
+      min_coverage: 0.06
+      score_weight: 0.20
+      center_blend: 0.35
+      max_center_shift_ratio: 0.20
+      selection_weight: 0.20
+    hough_param2: 28
+    # 以source_image_width/height对应的原图像像素为单位。
+    max_center_distance_px: 250
+    # 安全默认：找不到可靠圆就让本次请求失败，不使用可能偏移的框中心。
+    fallback_to_box_center: false
+
+plane_fitting:
+  # 固定为外围安装平面；不使用目标自身深度。
+  mode: surrounding_panel
+  surrounding_expand_ratio: 1.0
+  exclude_box_margin_ratio: 0.15
+  bbox_shrink_ratio: 0.15
+  center_patch_radius_px: 5
+  min_points: 100
+  max_sample_points: 20000
+  ransac_threshold_mm: 3.0
+  min_inlier_ratio: 0.35
+  max_rms_mm: 3.0
+
+pose:
+  # v3沿用v2坐标链：光心50mm参考 -> 逆手眼得到活动TCP -> 全局修正形成
+  # 标准TCP -> standard_to_tool得到最终工作TCP。全局修正只施加一次。
+  pipeline_version: 2
+  alignment_mode: tool
+  # 相机光心参考位到目标平面的距离。
+  standoff_mm: 50.0
+  output_reference_frame: jaka_base
+  output_pose_reference: active_tcp
+  output_position_unit: mm
+  output_rotation_type: rpy
+  output_angle_unit: deg
+  # 现场全局修正：只对“光心参考 @ 逆手眼”得到的标准活动TCP施加一次，
+  # 然后才叠加各工具工作位偏移。保持现场已验证的基座系分量加法语义。
+  tcp_correction:
+    position_mm: [-0.1, 11.0, 6.1]
+    rpy_deg: [1.2, 0.3, -6.0]
+
+# v3把工具标定独立出来；服务每次/get_tcp_pose都会重新读取并校验此文件。
+# 修改工具偏移后无需重启相机、YOLO或视觉服务。
+tool_offsets:
+  file: ./tool_offsets.yaml
+
+annotation_capture:
+  root_directory: ../field_test/images
+  image_format: png
+  jpeg_quality: 95
+  # 现场采样默认只保存彩色图；TCP写入field_test/test_case.yaml。
+  save_metadata_json: false

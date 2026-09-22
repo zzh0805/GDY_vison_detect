@@ -1,8 +1,14 @@
 __pycache__/
+preview_recordings/
+handeye_calib/native_camera/gdy_camera_worker
+handeye_calib/native_camera/gdy_camera_worker.new
+handeye_calib/native_camera/sdk_location.json
+# Vendor SDK must never be committed (hundreds of MB and vendor-licensed).
+3DCameraSDK*/
+# Local build-check toolchain / scratch space.
+tools_tmp/
 .vscode/
 *.py[cod]
-# Vendor SDK (hundreds of MB, vendor-licensed) must never be committed.
-3DCameraSDK*/
 linux_sdk_paths.env
 output/
 shared_images/
