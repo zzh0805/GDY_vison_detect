@@ -9,10 +9,10 @@
 
 ## `POST /snapshot`
 
-无需请求体。服务在 `http.snapshot_delay_s` 内持续读取并丢弃原始彩色/深度帧，再通过旧项目直接取流流程采集最终彩色图和配准点云。彩色 JPG 保存到 `http.snapshot_directory`，完整帧暂存在内存中。
+无需请求体。服务从后台最新帧缓存取得彩色图和配套深度，先把彩色 JPG 保存到临时目录，再按 `http.snapshot_delivery` 发布。当前配置为 `minio`：上传成功后返回MinIO对象URL并删除本地临时图片；完整彩深帧仍暂存在视觉服务内存中供后续解算。
 
 ```bash
-curl -X POST http://127.0.0.1:48051/snapshot
+curl -X POST http://192.168.1.20:48051/snapshot
 ```
 
 成功响应：
@@ -20,9 +20,40 @@ curl -X POST http://127.0.0.1:48051/snapshot
 ```json
 {
   "code": 200,
-  "path": "/home/nvidia/software/GDY_vison_detect_v3/shared_images/20260901120000.jpg"
+  "path": "http://192.168.1.189:9000/test/vision/snapshots/2026/09/18/20260918120000.jpg"
 }
 ```
+
+`path` 字段名为兼容现有后台保持不变，但字段值现在是URL。后台不应再把它当作本机文件路径，而应使用HTTP GET下载或直接交给前端显示。
+
+MinIO配置示例：
+
+```yaml
+http:
+  snapshot_delivery: minio
+  snapshot_minio:
+    endpoint: "http://192.168.1.189:9000"
+    bucket: test
+    object_prefix: vision/snapshots
+    url_mode: public
+    public_base_url: "http://192.168.1.189:9000"
+    delete_local_after_upload: true
+    access_key_env: GDY_MINIO_ACCESS_KEY
+    secret_key_env: GDY_MINIO_SECRET_KEY
+```
+
+真实访问密钥必须设置在视觉主机被Git忽略的 `linux_sdk_paths.env` 中。`url_mode: public` 要求对应桶或前缀允许后台/前端匿名读取；私有桶可改为 `presigned`，此时URL会按 `presigned_expiry_s` 到期。
+
+## `GET /snapshots/{文件名}`（HTTP备用发布模式）
+
+当 `snapshot_delivery: http` 时，视觉服务自身提供快照下载：
+
+```bash
+curl -o snapshot.jpg \
+  http://192.168.1.20:48051/snapshots/20260901120000.jpg
+```
+
+该接口只允许读取 `http.snapshot_directory` 目录中的 `.jpg/.jpeg` 文件，不允许子目录或 `..` 路径。
 
 ## `POST /get_tcp_pose`
 
@@ -41,7 +72,7 @@ curl -X POST http://127.0.0.1:48051/snapshot
 - `pos`：采集该帧时的 JAKA 当前活动 TCP，单位为 `mm + RPY rad`；
 - `base`：可选的安装面板矩形，提供时目标中心深度以该平面为准；
 - `target`：目标矩形，坐标对应 `target_matching` 中配置的原图尺寸；
-- `live=true`：收到请求后在 `http.live_capture_delay_s`（当前4秒）内持续丢弃原始帧，再采集新帧并完成检测、解算；
+- `live=true`：收到请求后优先等待请求后的新彩色帧，再配套选择深度并完成检测、解算；不增加固定4秒等待；
 - `live=false` 或省略：使用最近一次 `/snapshot` 的缓存帧。
 - `code`：`use_yolo=false` 时必填的工件业务编码；必须与 `tools.<工件>.code` 一致。YOLO模式下可省略。
 

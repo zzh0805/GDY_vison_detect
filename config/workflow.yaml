@@ -21,6 +21,23 @@ http:
   listen_host: 0.0.0.0
   listen_port: 48051
   snapshot_directory: ../shared_images
+  # minio：拍照后上传对象存储，path返回MinIO URL；http：由视觉服务提供下载。
+  snapshot_delivery: minio
+  # snapshot_delivery=http时可填写固定外部地址；留空则按请求Host自动生成。
+  snapshot_public_base_url: ""
+  snapshot_minio:
+    endpoint: "http://192.168.16.231:9000"
+    bucket: test
+    object_prefix: vision/snapshots
+    # public返回稳定对象URL，要求bucket/prefix允许后台读取；
+    # 如果桶为私有，可改为presigned并设置有效期。
+    url_mode: public
+    public_base_url: "http://192.168.16.231:9000"
+    presigned_expiry_s: 86400
+    delete_local_after_upload: true
+    # 凭据只从环境变量读取，禁止把真实密钥写入本YAML或提交Git。
+    access_key_env: GDY_MINIO_ACCESS_KEY
+    secret_key_env: GDY_MINIO_SECRET_KEY
   # 相机后台已经持续清理SDK队列，最终capture还会等待请求之后的新帧，
   # 因此不再固定额外等待4秒。机械臂到位稳定仍由上位流程负责。
   snapshot_delay_s: 0

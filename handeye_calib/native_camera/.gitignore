@@ -1,0 +1,4 @@
+*.so
+*.so.new
+sdk_location.json
+__pycache__/

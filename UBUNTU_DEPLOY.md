@@ -22,7 +22,7 @@ cp linux_sdk_paths.env.example linux_sdk_paths.env
 nano linux_sdk_paths.env
 ```
 
-必须确认所有路径指向 Ubuntu ARM64版本的 OpenNI、SurfacePro50 和 JAKA SDK。然后在目标Python环境安装依赖：
+必须确认所有路径指向 Ubuntu ARM64版本的 OpenNI、SurfacePro50 和 JAKA SDK，并填写MinIO访问密钥环境变量。真实密钥只保存在被Git忽略的 `linux_sdk_paths.env` 中。然后在目标Python环境安装依赖：
 
 ```bash
 python -m pip install -r requirements.txt
@@ -38,11 +38,12 @@ python -m pip install -r requirements.txt
 2. 相机标定、手眼标定和 YOLO模型文件存在；
 3. `http.listen_port` 与客户端、启动脚本一致，当前统一为 `48051`；
 4. `source_image_width/height` 与实际彩色图一致；
-5. `snapshot_delay_s=4`、`live_capture_delay_s=4`；这两个时段会主动丢弃旧帧，并确认请求超时大于丢帧、最终拍照和检测总耗时；
+5. `snapshot_delay_s=0`、`live_capture_delay_s=0`，机械臂到位稳定等待由上位流程负责；
 6. `pipeline_version=2`，且 `standoff_mm`、`tcp_correction` 使用本套机械结构对应的标定值；
 7. `tool_offsets.file` 指向有效工具文件，工具类别及 `standard_to_tool` 正确；
 8. `target_selection.use_yolo` 符合现场模式；关闭YOLO时，每个可选工件必须配置唯一 `code`，上位机请求也必须携带该值；
-9. 输出目录有写权限和足够空间。
+9. `snapshot_delivery=minio` 时确认MinIO endpoint、bucket、公共URL策略和两个凭据环境变量；
+10. 输出目录有写权限和足够空间。
 
 检查网络和文件：
 
@@ -50,8 +51,9 @@ python -m pip install -r requirements.txt
 ping -c 3 192.168.16.122
 test -f calibration/chishine_192_168_16_122_calibration.yml
 test -f calibration/handeye_result.json
-test -f models/xuncao.pt
+test -f models/best.pt
 test -f config/tool_offsets.yaml
+curl -I http://192.168.1.189:9000/minio/health/live
 ```
 
 ## 4. 首次前台启动

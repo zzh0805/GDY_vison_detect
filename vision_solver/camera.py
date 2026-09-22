@@ -59,7 +59,7 @@ class CameraManager:
 
     def disconnect(self) -> None:
         with self._lock:
-            if self.adapter is not None and self.adapter.is_connected():
+            if self.adapter is not None:
                 self.adapter.disconnect()
 
     def capture_3d(self) -> CameraFrame:

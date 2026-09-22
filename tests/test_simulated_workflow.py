@@ -7,6 +7,8 @@ import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 import cv2
 import numpy as np
@@ -219,7 +221,7 @@ class SimulatedWorkflowTests(unittest.TestCase):
                 "require_accepted": True,
             },
             "yolo": {
-                "model_file": str(PROJECT_ROOT / "models" / "xuncao.pt"),
+                "model_file": str(PROJECT_ROOT / "models" / "best.pt"),
                 "load_model_at_start": False,
                 "class_names": [],
             },
@@ -311,13 +313,18 @@ class SimulatedWorkflowTests(unittest.TestCase):
     def test_snapshot_then_camera_center_solve_through_http(self):
         with self.http_service() as (client, camera):
             captured = client.snapshot()
+            with urlopen(captured["path"], timeout=5) as response:
+                snapshot_bytes = response.read()
+                snapshot_content_type = response.headers.get("Content-Type")
             solved = client.get_tcp_pose(
                 [0, 0, 0, 0, 0, 0], 40, 40, 60, 60)
         self.assertEqual(set(captured), {"code", "path"})
         self.assertEqual(captured["code"], 200, captured)
-        image_path = Path(captured["path"])
-        self.assertTrue(image_path.is_file())
-        self.assertRegex(image_path.name, r"^\d{14}\.jpg$")
+        self.assertRegex(
+            Path(urlsplit(captured["path"]).path).name,
+            r"^\d{14}\.jpg$")
+        self.assertEqual(snapshot_content_type, "image/jpeg")
+        self.assertGreater(len(snapshot_bytes), 0)
         self.assertEqual(set(solved), {"code", "pos"})
         self.assertEqual(solved["code"], 200, solved)
         self.assertTrue(np.allclose(

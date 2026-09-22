@@ -562,7 +562,7 @@ class VisionToolTcpSolver:
                   if plane_dist is not None else float("nan")),
                  (float(ray_dist) * 1000.0
                   if ray_dist is not None else float("nan")))
-        log.info("v3.8.3求解: 目标模式=%s code=%s 类别=%s 工具=%s "
+        log.info("v3.8.4求解: 目标模式=%s code=%s 类别=%s 工具=%s "
                  "光心参考距离=%.1fmm "
                  "工具偏移xyz=%s rpy=%s 配置sha256=%s 标准TCP=%s 最终TCP=%s",
                  selection_mode,

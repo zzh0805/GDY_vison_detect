@@ -3,4 +3,4 @@ PyYAML
 opencv-python-headless
 ultralytics
 tifffile
-
+minio>=7.2,<8

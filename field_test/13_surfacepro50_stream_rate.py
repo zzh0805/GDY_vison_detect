@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import os
 import sys
 import time
 from pathlib import Path
@@ -21,7 +22,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from handeye_calib.surfacepro50_adapter import SurfacePro50Backend  # noqa: E402
+from handeye_calib.surfacepro50_adapter import (  # noqa: E402
+    DEFAULT_CHISHINE_CALIBRATION,
+    SurfacePro50Backend,
+)
 
 
 def _snapshot(backend: SurfacePro50Backend):
@@ -117,9 +121,30 @@ def main() -> int:
         "--mode", choices=("color-only", "color-depth"),
         default="color-depth")
     parser.add_argument("--seconds", type=float, default=15.0)
+    parser.add_argument(
+        "--calibration-yaml", default="",
+        help=("Depth到RGB软件配准标定文件；默认读取环境变量"
+              "SURFACEPRO50_CALIBRATION_YAML，未设置时使用项目根目录"
+              "calibration/chishine_192_168_16_122_calibration.yml"))
     args = parser.parse_args()
     if args.seconds <= 0:
         parser.error("--seconds必须大于0")
+
+    calibration_value = (
+        str(args.calibration_yaml).strip() or
+        str(os.environ.get("SURFACEPRO50_CALIBRATION_YAML") or "").strip() or
+        str(DEFAULT_CHISHINE_CALIBRATION))
+    calibration_path = Path(calibration_value).expanduser()
+    if not calibration_path.is_absolute():
+        calibration_path = (Path.cwd() / calibration_path).resolve()
+    else:
+        calibration_path = calibration_path.resolve()
+    if args.mode == "color-depth" and not calibration_path.is_file():
+        parser.error(
+            "color-depth模式需要Depth到RGB标定文件，未找到: "
+            f"{calibration_path}")
+    os.environ["SURFACEPRO50_CALIBRATION_YAML"] = str(calibration_path)
+    print(f"calibration_yaml={calibration_path}")
 
     backend = SurfacePro50Backend(
         endpoint=args.ip, capture_3d=args.mode == "color-depth")

@@ -1,16 +1,39 @@
-# GDY_vison_detect_v3 高低压视觉检测
+# GDY_vison_detect_v5 高低压视觉检测
 
-本目录是用于 Ubuntu ARM64 部署的洁净版本，组合如下：
+## v5.0.0：仅替换服务相机采集层
 
-- 解算沿用v2统一坐标链；目标匹配和相机流程保持原项目实现；
+基于本地GDY_vison_detect_v3.8创建，HTTP接口、workflow/tool配置、模型、标定、
+目标匹配、配准/点云重建、TCP解算及机械臂测试流程保持原值/原代码。
+正式同步相机改为原生SDK软触发（来自tool/soft_trigger_test已实测路径），
+SDK常驻独立子进程，空闲不触发不读帧，单次请求触发后获取RGB8+Z16。
+必须先在Ubuntu执行 `bash build_native_camera.sh`。
+
+部署、限制、回归测试及现场验收请先读 **[V5_NATIVE_CAMERA.md](V5_NATIVE_CAMERA.md)**。
+原文中OpenNI后台取流说明仅适用于历史v3.8或保留的旧诊断工具，不适用于v5正式服务。
+发布说明、现场测试结果和参数选择见 **[RELEASE_NOTES_v5.0.0.md](RELEASE_NOTES_v5.0.0.md)**。
+用户已完成Ubuntu桥接编译并启动服务；独立测试器已有现场结果，但完整服务长期稳定性仍需验证，SDK对象析构问题仍存在。
+
+以下为继承的业务功能说明（相机部分以V5_NATIVE_CAMERA.md为准）：
+
+- 解算沿用v2统一坐标链；目标匹配保持原实现，相机采集替换为原生SDK软触发；
 - 工具标定独立到 `config/tool_offsets.yaml`，每次解算自动重新读取，无需重启服务；
-- SurfacePro50 使用后台最新帧缓存，并按彩色主帧选择后续深度帧；
-- 不包含历史快照、检测图、点云、结果报告、日志或 `__pycache__`；
+- v5 SurfacePro50正式同步接口使用常驻子进程按请求软触发；
+- 创建v5时保留原样例图片，未复制output运行结果、日志或Python缓存；
 - 保留运行必需的 YOLO 模型、相机标定、手眼标定、配置和启动脚本。
 
 正式服务只计算目标 TCP，不控制机械臂运动。
 
-## 当前版本
+## 继承的v3.8更新历史
+
+`v3.8.4`（2026-09-18）更新内容：
+
+- `/snapshot` 拍照成功后把JPG直接上传MinIO，并把 `path` 从视觉主机本地绝对路径改为对象URL；
+- MinIO地址、桶、对象前缀和URL模式通过YAML配置，访问密钥只允许从环境变量读取，不进入代码或Git；
+- 支持稳定公共URL和有期限的预签名URL；上传成功后可删除视觉主机临时图片；
+- 保留 `snapshot_delivery: http` 备用模式，可由视觉服务通过 `GET /snapshots/{文件名}` 自行提供下载；
+- `/snapshot` 响应字段仍保持 `code` 和 `path`，后台只需把 `path` 当作URL读取。
+
+完整说明见 [RELEASE_NOTES_v3.8.4.md](RELEASE_NOTES_v3.8.4.md)。
 
 `v3.8.3`（2026-09-18）更新内容：
 
@@ -128,7 +151,7 @@
 
 ## 项目功能
 
-- 长期独占连接一台SurfacePro50，只在收到请求时采集彩色图和配准点云；
+- 长期独占连接一台SurfacePro50，后台持续消费并缓存最新原始帧，请求时再完成配准点云和检测；
 - 支持YOLO识别并匹配目标，也支持完全跳过YOLO、用红绿黑颜色筛选目标并采用最大有效外圆圆心；
 - 使用目标外围安装平面的点云拟合中心和法向，避免依赖目标自身深度；
 - 根据拍照TCP、手眼标定、50 mm光心参考位和全局修正计算标准活动TCP；
@@ -146,7 +169,7 @@
 | `config/workflow.yaml` | 启动时读取的固定配置：相机、模型、手眼文件、端口、全局修正等 |
 | `config/tool_offsets.yaml` | 每次解算重新读取的工具标定，可在服务运行时修改 |
 | `calibration/` | 相机标定与手眼标定文件 |
-| `models/xuncao.pt` | YOLO模型 |
+| `models/best.pt` | YOLO模型 |
 | `field_test/` | 快照、LabelMe标注、坐标解算、JAKA只读/运动联调脚本 |
 | `tool/` | YAML驱动的三模式工具标定、记录、备份及跨平台运行入口 |
 | `tool/interactive_tool_calibration.py` | 一次运行完成工件选择、位姿读取、计算、备份和自动写回的交互标定 |
@@ -160,9 +183,9 @@
 
 ## 当前相机取流方式
 
-服务启动时创建一个 `SurfacePro50SyncAdapter` 并连接一次相机。所有视觉任务由一个串行的 `vision-task-worker` 执行，请求到来时直接调用旧项目的 `adapter.capture()` 或 `capture_color()`；空闲时不循环拍照，也没有额外的相机采集线程或取帧命令队列。服务退出时才断开相机。
+服务启动时创建一个 `SurfacePro50SyncAdapter` 并连接一次相机。后台取流线程持续消费SDK队列，只保留彩色、深度各自的最新原始帧；检测、配准和点云计算仍由串行的 `vision-task-worker` 在请求到来时执行。服务退出时才断开相机。
 
-`POST /snapshot` 当前在4秒稳定期内持续丢弃原始帧，再采集彩色图和配准点云。`POST /get_tcp_pose` 使用 `live=true` 时也会在收到请求后主动丢帧4秒，然后采集新帧、检测并解算；不传 `live` 时使用最近一次 `/snapshot` 的内存缓存，不再重复丢帧。
+`POST /snapshot` 和 `live=true` 请求优先等待请求后的新彩色帧，再选择彩色之后到达的深度帧；3秒内没有新彩色帧时，按机器人已在拍照位静止的现场前提使用现有彩色缓存。`/snapshot` 的JPG上传MinIO后返回对象URL；不传 `live` 的 `/get_tcp_pose` 使用最近一次 `/snapshot` 的内存彩深缓存，不再重新采集。
 
 ## v3解算方式
 

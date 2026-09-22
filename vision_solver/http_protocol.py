@@ -9,6 +9,8 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from .snapshot_publisher import SnapshotPublisher
+
 
 ERROR_CODE_MAP = {
     "INVALID_REQUEST": 400,
@@ -53,6 +55,7 @@ class VisionHttpProtocol:
         self.solver = solver
         self.timeout_s = float(
             solver.config.http.get("request_timeout_s", 15.0))
+        self.snapshot_publisher = SnapshotPublisher(solver.config)
 
     @staticmethod
     def _failure(result: Mapping[str, Any]) -> dict:
@@ -62,14 +65,18 @@ class VisionHttpProtocol:
             "status": str(result.get("message") or internal),
         }
 
-    def snapshot(self) -> dict:
+    def snapshot(self, request_base_url: str | None = None) -> dict:
         result = self.solver.handle_task({
             "taskType": "http_snapshot",
             "taskId": _task_id("snapshot"),
         }, timeout_s=self.timeout_s)
         if not result.get("ok"):
             return self._failure(result)
-        return {"code": 200, "path": str(result["imagePath"])}
+        return {
+            "code": 200,
+            "path": self.snapshot_publisher.publish(
+                result["imagePath"], request_base_url),
+        }
 
     def capture_color(self, payload: Mapping[str, Any]) -> dict:
         """只采集彩色图；不创建或修改HTTP三维快照缓存。"""

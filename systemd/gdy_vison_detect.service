@@ -16,17 +16,17 @@ After=network-online.target
 [Service]
 Type=simple
 User=nvidia
-WorkingDirectory=/home/nvidia/software/GDY_vison_detect_v3
+WorkingDirectory=/home/nvidia/software/GDY_vison_detect_v5
 # 必须包含 conda 环境与 conda 基础目录，保证 load_sdk_env.sh 能激活 ur_odcam。
 Environment="PATH=/home/nvidia/miniconda3/envs/ur_odcam/bin:/home/nvidia/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=/bin/bash /home/nvidia/software/GDY_vison_detect_v3/run_service.sh
+ExecStart=/bin/bash /home/nvidia/software/GDY_vison_detect_v5/run_service.sh
 Restart=always
 RestartSec=3
 TimeoutStopSec=20
 KillSignal=SIGTERM
 # 日志同时落盘到项目内 service.log；也可用 journalctl -u gdy_vison_detect.service -f 查看。
-StandardOutput=append:/home/nvidia/software/GDY_vison_detect_v3/service.log
-StandardError=append:/home/nvidia/software/GDY_vison_detect_v3/service.log
+StandardOutput=append:/home/nvidia/software/GDY_vison_detect_v5/service.log
+StandardError=append:/home/nvidia/software/GDY_vison_detect_v5/service.log
 
 [Install]
 WantedBy=multi-user.target

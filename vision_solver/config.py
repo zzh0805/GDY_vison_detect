@@ -7,6 +7,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -290,6 +291,75 @@ class AppConfig:
         if float(http.get("snapshot_cache_ttl_s", 300.0)) <= 0.0:
             raise ValueError("http.snapshot_cache_ttl_s必须大于0")
         self.resolve_path(http.get("snapshot_directory", "../shared_images"))
+        snapshot_delivery = str(
+            http.get("snapshot_delivery", "http") or "http"
+        ).strip().lower()
+        if snapshot_delivery not in ("http", "minio"):
+            raise ValueError(
+                "http.snapshot_delivery只支持http或minio")
+        public_base_url = str(
+            http.get("snapshot_public_base_url", "") or "").strip()
+        if public_base_url:
+            parsed_url = urlsplit(public_base_url)
+            if (parsed_url.scheme not in ("http", "https") or
+                    not parsed_url.netloc or
+                    parsed_url.path not in ("", "/") or
+                    parsed_url.query or parsed_url.fragment):
+                raise ValueError(
+                    "http.snapshot_public_base_url必须是仅包含协议、"
+                    "主机和可选端口的HTTP(S)地址")
+        if snapshot_delivery == "minio":
+            if not bool(http.get("save_snapshot", True)):
+                raise ValueError(
+                    "MinIO发布要求http.save_snapshot=true")
+            minio = _mapping(
+                http.get("snapshot_minio"), "http.snapshot_minio")
+            endpoint = str(minio.get("endpoint") or "").strip()
+            endpoint_url = urlsplit(endpoint)
+            if (endpoint_url.scheme not in ("http", "https") or
+                    not endpoint_url.netloc or
+                    endpoint_url.path not in ("", "/") or
+                    endpoint_url.query or endpoint_url.fragment):
+                raise ValueError(
+                    "http.snapshot_minio.endpoint必须是仅包含协议、"
+                    "主机和可选端口的HTTP(S)地址")
+            bucket = str(minio.get("bucket") or "").strip()
+            if not bucket or "/" in bucket or "\\" in bucket:
+                raise ValueError(
+                    "http.snapshot_minio.bucket必须是有效的桶名")
+            prefix = str(
+                minio.get("object_prefix") or "vision/snapshots").strip()
+            if ".." in Path(prefix).parts or "\\" in prefix:
+                raise ValueError(
+                    "http.snapshot_minio.object_prefix不能包含..或反斜杠")
+            for env_name in ("access_key_env", "secret_key_env"):
+                if not str(minio.get(env_name) or "").strip():
+                    raise ValueError(
+                        f"http.snapshot_minio.{env_name}不能为空")
+            url_mode = str(
+                minio.get("url_mode") or "public").strip().lower()
+            if url_mode not in ("public", "presigned"):
+                raise ValueError(
+                    "http.snapshot_minio.url_mode只支持public或presigned")
+            if url_mode == "public":
+                minio_public_url = str(
+                    minio.get("public_base_url") or endpoint).strip()
+                parsed_public_url = urlsplit(minio_public_url)
+                if (parsed_public_url.scheme not in ("http", "https") or
+                        not parsed_public_url.netloc or
+                        parsed_public_url.path not in ("", "/") or
+                        parsed_public_url.query or
+                        parsed_public_url.fragment):
+                    raise ValueError(
+                        "http.snapshot_minio.public_base_url必须是仅包含"
+                        "协议、主机和可选端口的HTTP(S)地址")
+            else:
+                expiry_s = int(
+                    minio.get("presigned_expiry_s", 86400))
+                if expiry_s <= 0 or expiry_s > 7 * 24 * 60 * 60:
+                    raise ValueError(
+                        "http.snapshot_minio.presigned_expiry_s必须在"
+                        "1到604800秒之间")
 
 
 def load_config(path: Any) -> AppConfig:

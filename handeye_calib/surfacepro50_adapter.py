@@ -58,7 +58,7 @@ except ImportError:
 
 CS_PROPERTY_STREAM_INTRINSICS = 0xE0000001
 DEFAULT_CHISHINE_CALIBRATION = (
-    Path(__file__).resolve().parent / "config" /
+    Path(__file__).resolve().parents[1] / "calibration" /
     "chishine_192_168_16_122_calibration.yml"
 )
 
@@ -174,6 +174,29 @@ def _library_matches_python(library_path: Path) -> bool:
     if platform.system() == "Linux":
         return _elf_matches_python(library_path)
     return False
+
+
+def _release_video_frame(frame: Any) -> None:
+    """显式归还 OpenNI2 帧缓冲（oniFrameRelease）。
+
+    openni 包的 VideoFrame 依赖 __del__ 释放，回收时机不可控。相机帧很大
+    （彩色 1920x1080x3 约 6.2MB、深度约 4.1MB），后台取流线程若只 del 引用
+    等待 GC，回收速度会跟不上分配，内存持续上涨直至触发内核 OOM
+    （2026-09-21 现场：服务每小时被 OOM 杀掉一次）。
+    因此所有读帧处必须在复制完数据后立即调用本函数归还驱动帧。
+    """
+    if frame is None:
+        return
+    try:
+        close = getattr(frame, "close", None)
+        if callable(close):
+            close()
+            return
+        close = getattr(frame, "_close", None)
+        if callable(close):
+            close()
+    except Exception:
+        pass
 
 
 def _redist_candidates(explicit: Optional[str]) -> list[Path]:
@@ -812,7 +835,9 @@ class SurfacePro50Backend:
                             self._copy_depth_raw_frame(frame)
                             if is_depth else None)
                     finally:
-                        del frame
+                        # 显式归还驱动帧：后台线程持续取流，只 del 等 GC 会让
+                        # 未释放的帧不断堆积（每帧 6~10MB）直至内核 OOM。
+                        _release_video_frame(frame)
 
                     with self._frame_condition:
                         if image_snapshot is not None:
@@ -1134,7 +1159,7 @@ class SurfacePro50Backend:
                         before > 0 and after > 0):
                     compared = True
                     if after <= before:
-                        del frame
+                        _release_video_frame(frame)
                         raise RuntimeError(
                             f"{channel}帧未比丢弃帧更新: {name}={after}, 丢弃末帧={before}")
             log.log(logging.INFO if compared else logging.WARNING,
@@ -1232,7 +1257,7 @@ class SurfacePro50Backend:
                         name: getattr(frame, name, None)
                         for name in ("frameIndex", "timestamp")}
                     counts[id(stream)] += 1
-                    del frame
+                    _release_video_frame(frame)
             discarded = min(counts.values())
             self.last_discarded_frame_pairs = discarded
             self.last_discard_duration_s = time.monotonic() - started
@@ -1256,23 +1281,27 @@ class SurfacePro50Backend:
             h, w = int(frame.height), int(frame.width)
         else:
             h, w = int(snapshot["height"]), int(snapshot["width"])
-        if self.image_sensor == "color":
-            rgb = (
-                np.asarray(frame.get_buffer_as_triplet(), dtype=np.uint8)
-                .reshape(h, w, 3).copy()
+        try:
+            if self.image_sensor == "color":
+                rgb = (
+                    np.asarray(frame.get_buffer_as_triplet(), dtype=np.uint8)
+                    .reshape(h, w, 3).copy()
+                    if snapshot is None else
+                    np.asarray(snapshot["data"], dtype=np.uint8).reshape(h, w, 3))
+                bgr = rgb[:, :, ::-1].copy()
+                # 与 OpenCV COLOR_BGR2GRAY 等价，避免后端强依赖 cv2。
+                gray = np.clip(0.114 * bgr[:, :, 0] + 0.587 * bgr[:, :, 1] +
+                               0.299 * bgr[:, :, 2], 0, 255).astype(np.uint8)
+                return gray, bgr
+            raw = (
+                np.asarray(frame.get_buffer_as_uint16(), dtype=np.uint16)
+                .reshape(h, w).copy()
                 if snapshot is None else
-                np.asarray(snapshot["data"], dtype=np.uint8).reshape(h, w, 3))
-            bgr = rgb[:, :, ::-1].copy()
-            # 与 OpenCV COLOR_BGR2GRAY 等价，避免后端强依赖 cv2。
-            gray = np.clip(0.114 * bgr[:, :, 0] + 0.587 * bgr[:, :, 1] +
-                           0.299 * bgr[:, :, 2], 0, 255).astype(np.uint8)
-            return gray, bgr
-        raw = (
-            np.asarray(frame.get_buffer_as_uint16(), dtype=np.uint16)
-            .reshape(h, w).copy()
-            if snapshot is None else
-            np.asarray(snapshot["data"], dtype=np.uint16).reshape(h, w))
-        return self._uint16_to_gray(raw), None
+                np.asarray(snapshot["data"], dtype=np.uint16).reshape(h, w))
+            return self._uint16_to_gray(raw), None
+        finally:
+            # 像素数据已复制到 numpy，立即归还驱动帧。
+            _release_video_frame(frame)
 
     def _read_depth(self, color_bgr: Optional[np.ndarray] = None,
                     snapshot: Optional[Dict[str, Any]] = None
@@ -1282,11 +1311,15 @@ class SurfacePro50Backend:
             return None, None, 1.0, None
         if snapshot is None:
             frame = self._read_stream_frame(self.depth_stream, "深度")
-            h, w = int(frame.height), int(frame.width)
-            raw = np.asarray(
-                frame.get_buffer_as_uint16(), dtype=np.uint16
-            ).reshape(h, w).copy()
-            pixel_format = int(frame.videoMode.pixelFormat)
+            try:
+                h, w = int(frame.height), int(frame.width)
+                raw = np.asarray(
+                    frame.get_buffer_as_uint16(), dtype=np.uint16
+                ).reshape(h, w).copy()
+                pixel_format = int(frame.videoMode.pixelFormat)
+            finally:
+                # 原始 Z16 已复制，立即归还驱动帧。
+                _release_video_frame(frame)
         else:
             h, w = int(snapshot["height"]), int(snapshot["width"])
             raw = np.asarray(
@@ -1525,7 +1558,8 @@ class SurfacePro50SyncAdapter:
     adapter_name = "surfacepro50"
 
     def __init__(self, endpoint: str = "auto", capture_3d: bool = True, **kwargs):
-        self.backend = SurfacePro50Backend(endpoint, capture_3d,
+        from .native_surfacepro50 import NativeSurfacePro50Backend
+        self.backend = NativeSurfacePro50Backend(endpoint, capture_3d,
                                            kwargs.get("openni_redist"),
                                            kwargs.get(
                                                "unload_openni_on_disconnect"),

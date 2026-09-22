@@ -9,7 +9,10 @@ from vision_solver.http_protocol import VisionHttpProtocol
 
 
 class _Config:
-    http = {"request_timeout_s": 5}
+    http = {
+        "request_timeout_s": 5,
+        "snapshot_public_base_url": "http://vision-device:48051",
+    }
     matching = {"source_image_width": 1920, "source_image_height": 1080}
 
 
@@ -64,7 +67,29 @@ class HttpProtocolTests(unittest.TestCase):
     def test_snapshot_response_contains_only_code_and_path(self):
         result = VisionHttpProtocol(_RecordingSolver()).snapshot()
         self.assertEqual(result, {
-            "code": 200, "path": "/tmp/20260828120000.jpg"})
+            "code": 200,
+            "path": (
+                "http://vision-device:48051/snapshots/"
+                "20260828120000.jpg"),
+        })
+
+    def test_snapshot_uses_request_host_when_public_base_is_empty(self):
+        solver = _RecordingSolver()
+        solver.config = type("AutoUrlConfig", (), {
+            "http": {"request_timeout_s": 5},
+            "matching": {
+                "source_image_width": 1920,
+                "source_image_height": 1080,
+            },
+        })()
+        result = VisionHttpProtocol(solver).snapshot(
+            request_base_url="http://10.10.20.30:48051")
+        self.assertEqual(result, {
+            "code": 200,
+            "path": (
+                "http://10.10.20.30:48051/snapshots/"
+                "20260828120000.jpg"),
+        })
 
     def test_motion_result_adds_normalized_approach_without_changing_public(self):
         solver = _RecordingSolver()
@@ -130,7 +155,11 @@ class HttpProtocolTests(unittest.TestCase):
         self.assertEqual(task["roiCornersPx"], [
             [100, 200], [300, 200], [300, 400], [100, 400]])
         self.assertEqual(VisionHttpProtocol(_RecordingSolver()).snapshot(), {
-            "code": 200, "path": "/tmp/20260828120000.jpg"})
+            "code": 200,
+            "path": (
+                "http://vision-device:48051/snapshots/"
+                "20260828120000.jpg"),
+        })
 
     def test_empty_workpiece_code_is_rejected(self):
         result = VisionHttpProtocol(_RecordingSolver()).get_tcp_pose({

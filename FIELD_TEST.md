@@ -206,3 +206,21 @@ bash run_simulated_test.sh
 ```
 
 它用于检查HTTP协议、缓存流程和算法调用链，不能代替真实相机取帧与机械臂到位验证。
+
+## 6. SurfacePro50原始流测速
+
+测速脚本默认从项目根目录 `calibration/chishine_192_168_16_122_calibration.yml`
+读取Depth到RGB软件配准参数：
+
+```bash
+python field_test/13_surfacepro50_stream_rate.py \
+  --mode color-depth --seconds 15
+```
+
+如果现场标定文件位于其他位置，可显式指定：
+
+```bash
+python field_test/13_surfacepro50_stream_rate.py \
+  --mode color-depth --seconds 15 \
+  --calibration-yaml /绝对路径/chishine_calibration.yml
+```

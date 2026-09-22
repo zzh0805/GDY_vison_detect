@@ -1,18 +1,21 @@
 # 配置说明
 
-固定运行配置为 [config/workflow.yaml](config/workflow.yaml)，可热更新的工具标定为 [config/tool_offsets.yaml](config/tool_offsets.yaml)。相对路径以 `config` 目录为基准，例如 `../models/xuncao.pt` 指向项目根目录下的模型。
+固定运行配置为 [config/workflow.yaml](config/workflow.yaml)，可热更新的工具标定为 [config/tool_offsets.yaml](config/tool_offsets.yaml)。相对路径以 `config` 目录为基准，例如 `../models/best.pt` 指向项目根目录下的模型。
 
 ## 部署前必须确认
 
 | 配置 | 当前值 | 说明 |
 |---|---:|---|
 | `http.listen_port` | `48051` | HTTP监听端口，需与防火墙和客户端一致 |
-| `http.snapshot_delay_s` | `4` | `/snapshot`采集前主动读取并丢弃旧帧的持续秒数 |
-| `http.live_capture_delay_s` | `4` | `/get_tcp_pose live=true`采集前主动读取并丢弃旧帧的持续秒数 |
+| `http.snapshot_delivery` | `minio` | 快照上传MinIO并返回对象URL；可改为`http`备用模式 |
+| `http.snapshot_minio.endpoint` | `http://192.168.1.189:9000` | MinIO S3兼容地址 |
+| `http.snapshot_minio.bucket` | `test` | 快照对象桶 |
+| `http.snapshot_delay_s` | `0` | 上位流程已负责稳定等待，不再固定额外等待 |
+| `http.live_capture_delay_s` | `0` | 实时解算不再固定额外等待 |
 | `camera.ip` | `192.168.16.122` | SurfacePro50地址 |
 | `camera.calibration_file` | `../calibration/chishine_192_168_16_122_calibration.yml` | 相机内外参文件 |
 | `calibration.handeye_result_file` | `../calibration/handeye_result.json` | 手眼标定结果 |
-| `yolo.model_file` | `../models/xuncao.pt` | YOLO模型 |
+| `yolo.model_file` | `../models/best.pt` | YOLO模型 |
 | `pose.standoff_mm` | `50.0` | 光心参考位到目标平面的距离 |
 | `pose.pipeline_version` | `2` | 强制使用v2统一坐标链，防止误载v1配置 |
 | `tool_offsets.file` | `./tool_offsets.yaml` | 每次目标TCP解算重新读取的工具标定文件 |
@@ -42,13 +45,19 @@
 - `listen_host`：通常保持 `0.0.0.0`；
 - `listen_port`：当前为 `48051`；
 - `snapshot_directory`：`/snapshot` 保存彩色图的位置；
-- `snapshot_delay_s`：两步流程在最终快照前主动消费原始彩色/深度帧的时间，当前为 `4` 秒；
-- `live_capture_delay_s`：实时检测在最终采集前主动消费原始彩色/深度帧的时间，当前为 `4` 秒；
+- `snapshot_delivery`：`minio`直传对象存储，`http`由视觉服务自身提供下载；
+- `snapshot_public_base_url`：只用于`http`模式；留空时从请求Host自动生成；
+- `snapshot_minio.endpoint/bucket/object_prefix`：MinIO地址、桶和对象前缀；
+- `snapshot_minio.url_mode`：`public`返回稳定公共URL，`presigned`返回有期限签名URL；
+- `snapshot_minio.access_key_env/secret_key_env`：保存凭据的环境变量名，YAML中禁止写真实密钥；
+- `snapshot_minio.delete_local_after_upload`：上传成功后是否删除视觉机临时JPG；
+- `snapshot_delay_s`：两步流程额外稳定等待时间，当前为 `0` 秒；
+- `live_capture_delay_s`：实时检测额外稳定等待时间，当前为 `0` 秒；
 - `save_snapshot`：是否将快照保存到磁盘；
 - `request_timeout_s`：可选，未填写时为 15 秒；
 - `snapshot_cache_ttl_s`：可选，未填写时为 300 秒。
 
-两段时间同时承担机械臂稳定等待和OpenNI2积压帧清理，不再使用纯 `sleep`。丢弃阶段只消费SDK原始帧，不解码图像、不执行软件配准或点云重建。两步流程依赖快照文件供人工或后台框选，因此 `save_snapshot` 应保持开启。实时 `live=true` 流程不依赖快照文件，它只使用 `live_capture_delay_s`；缓存解算不会在 `/get_tcp_pose` 阶段重复丢帧。
+相机后台线程持续消费OpenNI2队列并只保存最新帧，因此默认不再增加固定等待。机械臂到位稳定仍由上位流程负责。MinIO模式要求 `save_snapshot: true`，视觉主机能访问MinIO的9000端口，并已安装requirements中的 `minio` SDK。实时 `live=true` 流程不依赖快照文件；缓存解算不会在 `/get_tcp_pose` 阶段重复采集。
 
 ## `camera`
 

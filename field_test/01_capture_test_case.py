@@ -8,7 +8,8 @@ from pathlib import Path
 import cv2
 
 from common import (create_http_client, create_jaka, load_test_case,
-                    read_jaka_pose_mm_rpy_deg, save_test_case)
+                    read_jaka_pose_mm_rpy_deg, resolve_local_snapshot,
+                    save_test_case)
 
 
 DEFAULT_CASE = Path(__file__).resolve().parent / "test_case.yaml"
@@ -32,7 +33,8 @@ def main() -> int:
     if int(result.get("code", 0)) != 200:
         raise RuntimeError(f"POST /snapshot失败: {result}")
 
-    image_path = Path(result["path"]).resolve()
+    # 只读本地：MinIO模式下path是URL，按文件名从快照目录取本地JPG。
+    image_path = resolve_local_snapshot(result["path"], case_path, data)
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError(f"快照已返回但无法读取: {image_path}")

@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Tuple
+from urllib.parse import unquote, urlsplit
 
 import numpy as np
 import yaml
@@ -34,6 +35,56 @@ def resolve_from(path: Path, value: Any) -> Path:
     if not result.is_absolute():
         result = path.parent / result
     return result.resolve()
+
+
+def snapshot_directory(case_path: Path, test_data: Mapping[str, Any]) -> Path:
+    """定位视觉服务保存快照的本地目录（要求脚本与视觉服务同机）。
+
+    目录取自 test_case.yaml 的 application_config 指向的 workflow.yaml
+    中 http.snapshot_directory，相对该 workflow.yaml 所在目录解析。
+    """
+    raw_config = test_data.get("application_config")
+    if not raw_config:
+        raise ValueError("test_case.yaml缺少application_config路径")
+    config_path = resolve_from(case_path, raw_config)
+    if not config_path.is_file():
+        raise FileNotFoundError(f"应用配置不存在: {config_path}")
+    content = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    http_config = content.get("http") or {}
+    directory = Path(
+        str(http_config.get("snapshot_directory") or "../shared_images")
+    ).expanduser()
+    if not directory.is_absolute():
+        directory = config_path.parent / directory
+    return directory.resolve()
+
+
+def resolve_local_snapshot(
+        image_ref: Any, case_path: Path,
+        test_data: Mapping[str, Any]) -> Path:
+    """/snapshot返回的path解析为本地快照文件（只读本地，不下载URL）。
+
+    path是HTTP(S) URL时，按URL最后一段在snapshot_directory下找同名文件；
+    path本身是本地路径时直接使用。文件缺失时提示检查删除开关。
+    """
+    value = str(image_ref or "").strip()
+    if not value:
+        raise ValueError("/snapshot响应缺少path")
+    parsed = urlsplit(value)
+    if parsed.scheme in ("http", "https"):
+        file_name = Path(unquote(parsed.path)).name
+        if not file_name:
+            raise ValueError(f"无法从path解析快照文件名: {value}")
+        local_path = snapshot_directory(case_path, test_data) / file_name
+    else:
+        local_path = Path(value).expanduser().resolve()
+    if not local_path.is_file():
+        raise FileNotFoundError(
+            f"本地快照不存在: {local_path}\n"
+            "该脚本要求与视觉服务同机运行；MinIO发布模式下若"
+            "snapshot_minio.delete_local_after_upload=true，"
+            "JPG会在上传后立即删除，请改为false并重启视觉服务。")
+    return local_path
 
 
 def create_http_client(test_data: Mapping[str, Any]):

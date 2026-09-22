@@ -6,8 +6,9 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from .logging_utils import get_logger
 
@@ -37,6 +38,9 @@ class VisionHttpServer:
         self.protocol = protocol
         self.host = str(host)
         self.port = int(port)
+        self.snapshot_directory = protocol.solver.config.resolve_path(
+            protocol.solver.config.http.get(
+                "snapshot_directory", "../shared_images"))
         self._stop_lock = threading.Lock()
         self._stopped = False
         self._stop_complete = threading.Event()
@@ -49,6 +53,7 @@ class VisionHttpServer:
 
     def _handler_class(self):
         protocol = self.protocol
+        snapshot_directory = self.snapshot_directory.resolve()
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -85,13 +90,76 @@ class VisionHttpServer:
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise ValueError(f"JSON解析失败: {exc}") from exc
 
+            def _request_base_url(self) -> str:
+                host = str(self.headers.get("Host") or "").strip()
+                if not host or any(char in host for char in "\r\n/\\"):
+                    return ""
+                return f"http://{host}"
+
+            def _send_snapshot_file(self, request_path: str) -> None:
+                prefix = "/snapshots/"
+                encoded_name = request_path[len(prefix):]
+                file_name = unquote(encoded_name)
+                if (not file_name or file_name in (".", "..") or
+                        "/" in file_name or "\\" in file_name or
+                        Path(file_name).name != file_name or
+                        Path(file_name).suffix.lower() not in
+                        (".jpg", ".jpeg")):
+                    self._send_json(
+                        {"code": 404, "status": "快照不存在"}, 404)
+                    return
+                image_path = (snapshot_directory / file_name).resolve()
+                if (image_path.parent != snapshot_directory or
+                        not image_path.is_file()):
+                    self._send_json(
+                        {"code": 404, "status": "快照不存在"}, 404)
+                    return
+                size = image_path.stat().st_size
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                with image_path.open("rb") as source:
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+
+            def do_GET(self):
+                path = urlsplit(self.path).path
+                started = time.perf_counter()
+                client = self.address_string()
+                try:
+                    if path.startswith("/snapshots/"):
+                        self._send_snapshot_file(path)
+                        log.info(
+                            "HTTP GET %s %s 耗时=%.1fms",
+                            path, client,
+                            (time.perf_counter() - started) * 1000.0)
+                        return
+                    self._send_json(
+                        {"code": 404, "status": f"未知接口{path}"}, 404)
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError) as exc:
+                    log.warning(
+                        "HTTP %s 下载快照时客户端已断开 %s: %s",
+                        client, path, exc)
+                except Exception as exc:
+                    log.error("HTTP GET %s 处理异常 %s: %s",
+                              client, path, exc, exc_info=True)
+                    self._send_json({"code": 500, "status": str(exc)}, 500)
+
             def do_POST(self):
                 path = urlsplit(self.path).path.rstrip("/") or "/"
                 started = time.perf_counter()
                 client = self.address_string()
                 try:
                     if path == "/snapshot":
-                        result = protocol.snapshot()
+                        result = protocol.snapshot(
+                            request_base_url=self._request_base_url())
                         self._send_json(result)
                         log.info("HTTP /snapshot %s 耗时=%.1fms code=%s",
                                  client, (time.perf_counter() - started) * 1000.0,
